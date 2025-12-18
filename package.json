@@ -18,8 +18,7 @@
     "service:logs": "tail -f ~/.claude-research-team/logs/service.log",
     "test": "vitest",
     "lint": "eslint src/",
-    "clean": "rm -rf dist/",
-    "sync-plugin": "node scripts/sync-plugin.js"
+    "clean": "rm -rf dist/"
   },
   "keywords": [
     "claude",
@@ -35,7 +34,7 @@
   "license": "AGPL-3.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/bigphoot/claude-research-team"
+    "url": "https://github.com/bigph00t/claude-research-team"
   },
   "engines": {
     "node": ">=18.0.0"

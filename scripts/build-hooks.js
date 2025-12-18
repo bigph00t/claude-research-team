@@ -21,6 +21,14 @@ if (!existsSync(hooksDir)) {
 
 const hooks = [
   {
+    entry: join(rootDir, 'src', 'hooks', 'session-start.ts'),
+    out: join(hooksDir, 'session-start.js'),
+  },
+  {
+    entry: join(rootDir, 'src', 'hooks', 'session-end.ts'),
+    out: join(hooksDir, 'session-end.js'),
+  },
+  {
     entry: join(rootDir, 'src', 'hooks', 'user-prompt-submit.ts'),
     out: join(hooksDir, 'user-prompt-submit.js'),
   },

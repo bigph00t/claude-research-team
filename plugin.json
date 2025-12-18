@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Autonomous research agents for Claude Code - passively research and inject helpful context",
   "author": "bigphoot",
-  "repository": "https://github.com/bigphoot/claude-research-team",
+  "repository": "https://github.com/bigph00t/claude-research-team",
   "license": "AGPL-3.0",
   "main": "dist/plugin/index.js",
   "engines": {
