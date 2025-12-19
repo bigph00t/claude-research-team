@@ -18,15 +18,23 @@
   "skills": [
     {
       "name": "research",
-      "description": "Queue background research on a topic. Use when you need to gather information that will be passively injected later.",
+      "description": "Research a topic using autonomous web search and AI synthesis. Use when you need external information, documentation lookup, or to validate technical approaches.",
       "file": "dist/skills/research.js"
     },
     {
       "name": "research-status",
-      "description": "Check the status of the research queue and recent findings.",
+      "description": "Check the status of the research service and recent research history.",
       "file": "dist/skills/research-status.js"
+    },
+    {
+      "name": "research-detail",
+      "description": "Get more detail from a previous research finding. Use when you need deeper information than the initial summary provided.",
+      "file": "dist/skills/research-detail.js"
     }
   ],
+  "mcp": {
+    "config": ".mcp.json"
+  },
   "settings": {
     "port": {
       "type": "number",

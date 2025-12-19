@@ -39,6 +39,13 @@ export class QueueManager extends EventEmitter {
   }
 
   /**
+   * Get the database instance
+   */
+  getDatabase(): ResearchDatabase {
+    return this.db;
+  }
+
+  /**
    * Start the queue processor
    */
   start(): void {

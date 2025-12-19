@@ -11,9 +11,11 @@
  */
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { ResearchTask, ResearchResult, ResearchDepth } from '../types.js';
+import type { ResearchTask, ResearchResult, ResearchDepth, ResearchFinding } from '../types.js';
 import { Logger } from '../utils/logger.js';
 import { getMemoryIntegration } from '../memory/memory-integration.js';
+import { getDatabase } from '../database/index.js';
+import { v4 as uuidv4 } from 'uuid';
 
 interface SearchResult {
   title: string;
@@ -67,24 +69,28 @@ export class ResearchExecutor {
     const startTime = Date.now();
     const config = DEPTH_CONFIGS[task.depth];
 
-    // Initialize memory integration
+    // Initialize integrations
     await this.ensureMemory();
     const memory = getMemoryIntegration();
+    const db = getDatabase();
 
     try {
-      // Step 0: Check for existing/related research
+      // Step 0: Check for existing/related research in local database
       let relatedContext = '';
       try {
-        const existing = await memory.hasExistingResearch(task.query);
-        if (existing.exists && existing.related.length > 0) {
-          this.logger.info('Found existing research, enriching context');
-          relatedContext = this.buildRelatedContext(existing.related);
-        } else if (existing.related.length > 0) {
-          this.logger.info(`Found ${existing.related.length} related research items`);
-          relatedContext = this.buildRelatedContext(existing.related);
+        const existingFindings = db.searchFindings(task.query, 5);
+        if (existingFindings.length > 0) {
+          this.logger.info(`Found ${existingFindings.length} related findings in local database`);
+          relatedContext = this.buildRelatedContext(
+            existingFindings.map(f => ({
+              query: f.query,
+              summary: f.summary,
+              confidence: f.confidence,
+            }))
+          );
         }
       } catch (e) {
-        this.logger.debug('Memory lookup skipped', e);
+        this.logger.debug('Local database lookup skipped', e);
       }
 
       // Step 1: Search the web
@@ -122,17 +128,37 @@ export class ResearchExecutor {
         confidence: synthesis.confidence,
       };
 
-      // Step 4: Store research in memory for future learning
+      // Step 4: Store research in local database
+      const findingId = uuidv4();
       try {
-        const researchId = await memory.storeResearch(
-          task.query,
-          task.depth,
-          result,
-          task.context
-        );
-        this.logger.info(`Research stored in memory: #${researchId}`);
+        const finding: ResearchFinding = {
+          id: findingId,
+          query: task.query,
+          summary: result.summary,
+          keyPoints: this.extractKeyPoints(result.summary),
+          fullContent: result.fullContent,
+          sources: result.sources.map(s => ({
+            ...s,
+            qualityScore: s.relevance,
+          })),
+          domain: this.inferDomain(task.query),
+          depth: task.depth,
+          confidence: result.confidence,
+          createdAt: Date.now(),
+        };
+
+        db.saveFinding(finding);
+        this.logger.info(`Research stored in local database: ${findingId}`);
+
+        // Step 5: Optionally inject to claude-mem if high quality
+        const injectionResult = await memory.injectFindingIfQualified(finding, task.sessionId);
+        if (injectionResult.injected) {
+          this.logger.info(`Injected to claude-mem: observation #${injectionResult.observationId}`);
+        } else {
+          this.logger.debug(`Not injected to claude-mem: ${injectionResult.reason}`);
+        }
       } catch (e) {
-        this.logger.warn('Failed to store research in memory', e);
+        this.logger.warn('Failed to store research', e);
       }
 
       return result;
@@ -156,6 +182,51 @@ export class ResearchExecutor {
     }
     parts.push('Use this prior knowledge to provide more comprehensive insights. Focus on NEW information not covered above.');
     return parts.join('\n');
+  }
+
+  /**
+   * Extract key points from a summary
+   */
+  private extractKeyPoints(summary: string): string[] {
+    // Split by sentences and filter for substantive ones
+    const sentences = summary
+      .split(/[.!?]+/)
+      .map(s => s.trim())
+      .filter(s => s.length > 30 && s.length < 200);
+
+    // Take up to 5 key sentences
+    return sentences.slice(0, 5);
+  }
+
+  /**
+   * Infer domain/topic from query
+   */
+  private inferDomain(queryText: string): string | undefined {
+    const lowerQuery = queryText.toLowerCase();
+
+    // Common tech domains
+    const domainPatterns: Record<string, RegExp> = {
+      typescript: /\b(typescript|ts|tsx)\b/,
+      javascript: /\b(javascript|js|node|npm|deno|bun)\b/,
+      react: /\b(react|jsx|next\.?js|gatsby)\b/,
+      python: /\b(python|pip|django|flask|fastapi)\b/,
+      rust: /\b(rust|cargo|rustc)\b/,
+      go: /\b(golang|go\s+lang)\b/,
+      docker: /\b(docker|container|kubernetes|k8s)\b/,
+      database: /\b(sql|database|postgres|mysql|mongodb|redis)\b/,
+      api: /\b(api|rest|graphql|grpc|http)\b/,
+      git: /\b(git|github|gitlab|version control)\b/,
+      ai: /\b(ai|machine learning|llm|gpt|claude|anthropic)\b/,
+      devops: /\b(devops|ci\/cd|jenkins|github actions)\b/,
+    };
+
+    for (const [domain, pattern] of Object.entries(domainPatterns)) {
+      if (pattern.test(lowerQuery)) {
+        return domain;
+      }
+    }
+
+    return undefined;
   }
 
   /**

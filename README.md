@@ -118,15 +118,22 @@ The plugin uses Claude Code's **stdin/stdout hook protocol** to stream conversat
 
 ## Features
 
+### Core Capabilities
 - **100% Claude Powered** — Uses Claude Agent SDK for AI synthesis, no external AI keys needed
 - **Intelligent Trigger Detection** — Recognizes questions, errors, and research-worthy patterns
 - **Priority Queue Management** — Research tasks are prioritized by relevance and urgency
 - **Passive Context Injection** — Results are injected without disrupting your workflow
-- **Budget Control** — Configurable limits prevent context pollution
 - **Web Dashboard** — Monitor research tasks and queue status at http://localhost:3200
-- **Deep claude-mem Integration** — Research persists across sessions in shared database
-- **Full-Text Search** — SQLite FTS5 enables fast search across all research
 - **Plugin Architecture** — Install as a Claude Code plugin with hooks and skills
+
+### v1.0 Advanced Features
+- **Multi-Agent Research** — Specialized agents (web-search, code-expert, docs-expert) work in parallel
+- **Meta-Evaluator** — Evaluates research quality, detects knowledge gaps, suggests improvements
+- **Source Assessor** — Tracks source reliability per domain/topic, learns from feedback
+- **Progressive Disclosure** — 3-tier injection system (summary → key points → full content)
+- **Meta-Learning** — System learns which approaches work best for different query types
+- **Isolated Learning** — Local research.db stores all findings; claude-mem gets synthesized insights only
+- **Proactive Triggers** — Detects stuck patterns, repeated errors, and topic focus
 
 ---
 
@@ -285,6 +292,38 @@ Configuration is stored in `~/.claude-research-team/config.json`:
 
 ---
 
+## Multi-Agent Architecture
+
+Claude Research Team uses specialized agents that work together for comprehensive research:
+
+### Search Specialists (Parallel Execution)
+
+| Agent | Domain | Tools |
+|-------|--------|-------|
+| **Web Search** | General web research | Serper, Brave, Tavily, Jina Reader |
+| **Code Expert** | Code repositories, Stack Overflow | GitHub API, Stack Overflow |
+| **Docs Expert** | Official documentation | MDN, official docs sites |
+
+### Evaluation Agents (Post-Research)
+
+| Agent | Purpose |
+|-------|---------|
+| **Coordinator** | Plans research strategy, evaluates progress, synthesizes results |
+| **Meta-Evaluator** | Scores research quality, detects gaps, suggests improvements |
+| **Source Assessor** | Tracks source reliability, learns from feedback |
+
+### Learning System
+
+The **Meta-Learner** continuously improves research quality:
+
+1. **Query Performance** — Tracks which depths/approaches work for different query types
+2. **Source Scoring** — Learns which domains are reliable for specific topics
+3. **Implicit Feedback** — Detects success/failure signals from Claude's behavior:
+   - Positive: Error resolved, task completed, suggestion followed
+   - Negative: Same error repeated, injection ignored, clarifying question asked
+
+---
+
 ## How It Works
 
 ### 1. Hook Communication (stdin/stdout Protocol)
@@ -383,8 +422,27 @@ Use the research-status skill to check the queue
 
 | Skill | Description |
 |-------|-------------|
-| `research` | Queue background research on a topic |
+| `research` | Execute or queue research on a topic (supports quick/medium/deep depth) |
 | `research-status` | Check queue status and recent findings |
+| `research-detail` | Get more detail from a previous finding (progressive disclosure) |
+
+### Progressive Disclosure with research-detail
+
+When research is injected, you initially see a **summary only** (Level 1). If you need more detail:
+
+```
+Use the research-detail skill to get key points for finding "abc123"
+```
+
+```
+Use the research-detail skill with level "full" for finding "abc123"
+```
+
+| Level | What You Get |
+|-------|--------------|
+| 1 (default injection) | Summary only (~100-200 tokens) |
+| 2 (`key_points`) | Summary + bullet point insights |
+| 3 (`full`) | Summary + key points + complete scraped content |
 
 ---
 
@@ -558,33 +616,47 @@ npm run clean && npm run build
 ```
 claude-research-team/
 ├── assets/
-│   └── logo.png            # Project logo
+│   ├── logo.png              # Project logo (for README)
+│   ├── logo.webp             # Dashboard logo (static)
+│   └── logo-animated.webp    # Dashboard logo (when research active)
 ├── src/
-│   ├── conversation/       # Streaming conversation analyzer
-│   │   └── analyzer.ts     # Session state + research opportunity detection
-│   ├── crew/               # Research executor (Claude SDK synthesis)
-│   ├── database/           # SQLite with FTS5 for local storage
-│   ├── hooks/              # Claude Code lifecycle hooks (stdin/stdout protocol)
-│   │   ├── cli-handler.ts  # Shared stdin/stdout protocol handler
-│   │   ├── session-start.ts
-│   │   ├── session-end.ts
-│   │   ├── user-prompt-submit.ts
-│   │   └── post-tool-use.ts
-│   ├── injection/          # Context injection manager
-│   ├── memory/             # claude-mem database integration
-│   ├── plugin/             # Plugin entry point
-│   ├── queue/              # Task queue manager
-│   ├── service/            # HTTP service & web dashboard
-│   ├── skills/             # Claude Code skills
-│   ├── sync/               # HTTP-based claude-mem sync (alternative)
-│   ├── triggers/           # Pattern-based trigger detection
-│   ├── utils/              # Logger, config utilities
-│   ├── types.ts            # TypeScript types
-│   ├── index.ts            # Library exports
-│   └── cli.ts              # CLI entry point
+│   ├── agents/               # Agent architecture
+│   │   ├── coordinator.ts    # Orchestrates research planning & synthesis
+│   │   ├── conversation-watcher.ts  # Proactive trigger detection
+│   │   └── specialists/      # Domain-specialized agents
+│   │       ├── base.ts       # Base specialist interface
+│   │       ├── web-search.ts # General web research
+│   │       ├── code-expert.ts    # Code-specific research (GitHub, SO)
+│   │       ├── docs-expert.ts    # Documentation research
+│   │       ├── meta-evaluator.ts # Research quality evaluation
+│   │       └── source-assessor.ts # Source reliability tracking
+│   ├── conversation/         # Streaming conversation analyzer
+│   ├── crew/                 # Research execution
+│   │   ├── autonomous-crew.ts    # Self-directing research crew
+│   │   └── research-executor.ts  # Single research execution
+│   ├── database/             # SQLite with FTS5
+│   │   └── index.ts          # research.db with research_findings, injection_log, source_quality
+│   ├── hooks/                # Claude Code lifecycle hooks
+│   ├── injection/            # Context injection manager
+│   ├── learning/             # Meta-learning system
+│   │   └── meta-learner.ts   # Query performance tracking, source scoring
+│   ├── memory/               # claude-mem integration
+│   │   └── memory-integration.ts  # Isolated learning, single injection category
+│   ├── plugin/               # Plugin entry point
+│   ├── queue/                # Task queue manager
+│   ├── service/              # HTTP service & web dashboard
+│   ├── skills/               # Claude Code skills
+│   │   ├── research.ts       # /research skill
+│   │   ├── research-status.ts    # /research-status skill
+│   │   └── research-detail.ts    # /research-detail skill (progressive disclosure)
+│   ├── sync/                 # HTTP-based claude-mem sync
+│   ├── utils/                # Logger, config utilities
+│   ├── types.ts              # TypeScript types
+│   ├── index.ts              # Library exports
+│   └── cli.ts                # CLI entry point
 ├── scripts/
-│   └── build-hooks.js      # Hook bundler (esbuild)
-├── plugin.json             # Claude Code plugin manifest
+│   └── build-hooks.js        # Hook bundler (esbuild)
+├── plugin.json               # Claude Code plugin manifest
 ├── package.json
 ├── tsconfig.json
 └── README.md

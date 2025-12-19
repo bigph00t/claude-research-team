@@ -231,6 +231,7 @@ export class InjectionManager {
    * Format research result for injection
    * Keep it concise to minimize context pollution
    * Includes prompt to inquire for more details if needed
+   * Handles pivot suggestions for alternative approaches
    */
   private formatInjection(task: ResearchTask): string {
     if (!task.result) return '';
@@ -251,6 +252,17 @@ export class InjectionManager {
     if (task.result.sources.length > 0) {
       const topSource = task.result.sources[0];
       parts.push(`Source: ${topSource.title} (${topSource.url})`);
+    }
+
+    // Add pivot suggestion if present (alternative approach detected)
+    if (task.result.pivot) {
+      parts.push('');
+      const pivot = task.result.pivot;
+      const urgencyEmoji = pivot.urgency === 'high' ? '🚨' :
+                          pivot.urgency === 'medium' ? '💡' : 'ℹ️';
+      parts.push(`${urgencyEmoji} **Alternative Approach Detected:**`);
+      parts.push(`${pivot.alternative}`);
+      parts.push(`_Reason: ${pivot.reason}_`);
     }
 
     // Prompt to inquire for more - teaches Claude to use research tools

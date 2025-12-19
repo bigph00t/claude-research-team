@@ -13,8 +13,14 @@
 export { ResearchService } from './service/server.js';
 export { QueueManager } from './queue/manager.js';
 export { InjectionManager } from './injection/manager.js';
-export { TriggerDetector } from './triggers/detector.js';
 export { ResearchExecutor } from './crew/research-executor.js';
+
+// New agents and crew
+export { getSessionManager, SessionManager } from './service/session-manager.js';
+export { getConversationWatcher, ConversationWatcher } from './agents/conversation-watcher.js';
+export { getAutonomousCrew, AutonomousResearchCrew } from './crew/autonomous-crew.js';
+export { CoordinatorAgent } from './agents/coordinator.js';
+export * from './agents/specialists/index.js';
 
 // Database
 export { ResearchDatabase, getDatabase, closeDatabase } from './database/index.js';
@@ -34,6 +40,7 @@ export type {
   ResearchDepth,
   ResearchStatus,
   TriggerSource,
+  PivotSuggestion,
   InjectionRecord,
   InjectionBudget,
   Session,

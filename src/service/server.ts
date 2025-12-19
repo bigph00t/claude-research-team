@@ -3,20 +3,26 @@
  * Provides API endpoints and web UI dashboard
  */
 
+// Load environment variables from .env file (must be first import)
+import 'dotenv/config';
+
 import express, { Request, Response, NextFunction } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, Server } from 'http';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { existsSync } from 'fs';
+import { fileURLToPath } from 'url';
 
 import { QueueManager } from '../queue/manager.js';
 import { InjectionManager } from '../injection/manager.js';
-import { TriggerDetector } from '../triggers/detector.js';
 import { getDatabase, closeDatabase } from '../database/index.js';
 import { getConfig, ConfigManager } from '../utils/config.js';
 import { Logger, setLogLevel, setLogFile } from '../utils/logger.js';
-import { getMemoryIntegration } from '../memory/memory-integration.js';
-import { getConversationAnalyzer, type ResearchOpportunity } from '../conversation/analyzer.js';
+import { getConversationAnalyzer } from '../conversation/analyzer.js';
+import type { ResearchFinding } from '../types.js';
+import { getSessionManager } from './session-manager.js';
+import { getConversationWatcher, type WatcherDecision } from '../agents/conversation-watcher.js';
+import { getAutonomousCrew } from '../crew/autonomous-crew.js';
 import type {
   ServiceStatus,
   ApiResponse,
@@ -32,7 +38,8 @@ export class ResearchService {
   private wss: WebSocketServer;
   private queue: QueueManager;
   private injector: InjectionManager;
-  private detector: TriggerDetector;
+  private sessionManager = getSessionManager();
+  private watcher = getConversationWatcher();
   private config: ConfigManager;
   private logger: Logger;
   private startTime: number = Date.now();
@@ -49,7 +56,9 @@ export class ResearchService {
     // Initialize components
     this.queue = new QueueManager(this.config.getValue('queue'));
     this.injector = new InjectionManager(this.config.getValue('injection'));
-    this.detector = new TriggerDetector();
+
+    // Setup watcher events
+    this.setupWatcherEvents();
 
     // Setup Express
     this.app = express();
@@ -132,6 +141,60 @@ export class ResearchService {
   }
 
   /**
+   * Setup watcher events for autonomous research
+   */
+  private setupWatcherEvents(): void {
+    // When watcher triggers research, execute via autonomous crew
+    this.watcher.on('research:triggered', async (sessionId: string, decision: WatcherDecision) => {
+      this.logger.info(`Watcher triggered research for ${sessionId}`, {
+        query: decision.query,
+        type: decision.researchType,
+        confidence: decision.confidence,
+      });
+
+      if (!decision.query) return;
+
+      try {
+        // Use autonomous crew for background research
+        const crew = getAutonomousCrew();
+        const result = await crew.explore({
+          query: decision.query,
+          sessionId,
+          context: decision.alternativeHint,
+          depth: decision.researchType === 'direct' ? 'medium' : 'deep',
+        });
+
+        // Queue injection when complete
+        if (result.summary) {
+          this.sessionManager.queueInjection(sessionId, {
+            summary: result.summary,
+            query: decision.query,
+            relevance: result.confidence,
+            priority: decision.priority,
+            pivot: result.pivot,
+          });
+
+          this.logger.info(`Research complete for ${sessionId}`, {
+            query: decision.query,
+            confidence: result.confidence,
+            hasPivot: !!result.pivot,
+          });
+        }
+      } catch (error) {
+        this.logger.error(`Background research failed for ${sessionId}`, error);
+      }
+    });
+
+    this.watcher.on('analysis:complete', (sessionId: string, decision: WatcherDecision) => {
+      this.broadcast('watcherAnalysis', { sessionId, decision });
+    });
+
+    this.watcher.on('cooldown:active', (sessionId: string, remainingMs: number) => {
+      this.logger.debug(`Cooldown active for ${sessionId}: ${remainingMs}ms`);
+    });
+  }
+
+  /**
    * Setup API routes
    */
   private setupRoutes(): void {
@@ -208,27 +271,33 @@ export class ResearchService {
     });
 
     // ===== Trigger Detection Routes =====
+    // Now uses ConversationWatcher for AI-powered detection
 
-    // Analyze prompt for triggers
-    this.app.post('/api/analyze/prompt', (req, res): void => {
-      const { prompt } = req.body;
-      if (!prompt) {
-        res.status(400).json(this.errorResponse('Prompt is required'));
+    // Quick pattern-based analysis (no Claude call)
+    this.app.post('/api/analyze/quick', (req, res): void => {
+      const { sessionId } = req.body;
+      if (!sessionId) {
+        res.status(400).json(this.errorResponse('sessionId is required'));
         return;
       }
-      const result = this.detector.analyzePrompt(prompt);
-      res.json(this.successResponse(result));
+      const result = this.watcher.quickAnalyze(sessionId);
+      res.json(this.successResponse(result || { shouldResearch: false, reason: 'No patterns matched' }));
     });
 
-    // Analyze tool output for triggers
-    this.app.post('/api/analyze/tool-output', (req, res): void => {
-      const { toolName, output } = req.body;
-      if (!toolName || !output) {
-        res.status(400).json(this.errorResponse('toolName and output are required'));
-        return;
+    // Full AI-powered analysis
+    this.app.post('/api/analyze/full', async (req, res): Promise<void> => {
+      try {
+        const { sessionId, eventType } = req.body;
+        if (!sessionId) {
+          res.status(400).json(this.errorResponse('sessionId is required'));
+          return;
+        }
+        const result = await this.watcher.analyze(sessionId, eventType || 'user_prompt');
+        res.json(this.successResponse(result));
+      } catch (error) {
+        this.logger.error('Analysis failed', error);
+        res.status(500).json(this.errorResponse(String(error)));
       }
-      const result = this.detector.analyzeToolOutput(toolName, output);
-      res.json(this.successResponse(result));
     });
 
     // ===== Injection Routes =====
@@ -297,20 +366,37 @@ export class ResearchService {
           return;
         }
 
+        // Use SessionManager to track the prompt
+        this.sessionManager.addUserPrompt(sessionId, prompt, projectPath);
+
+        // Try quick analysis first (pattern-based, no Claude call)
+        let decision = this.watcher.quickAnalyze(sessionId);
+
+        // If no quick match, run full analysis with Claude
+        if (!decision) {
+          decision = await this.watcher.analyze(sessionId, 'user_prompt');
+        }
+
+        // Also maintain legacy analyzer for backward compatibility
         const analyzer = getConversationAnalyzer();
         const opportunity = analyzer.processUserPrompt(sessionId, prompt, projectPath);
 
-        // If research should be queued, do it
-        if (opportunity.shouldResearch && opportunity.query) {
+        // Combine decisions - prefer watcher if confident
+        const shouldResearch = decision?.shouldResearch ||
+          (opportunity.shouldResearch && opportunity.confidence > 0.6);
+        const query = decision?.query || opportunity.query;
+
+        if (shouldResearch && query) {
           analyzer.markResearchPerformed(sessionId);
-          await this.queueResearchFromOpportunity(sessionId, opportunity);
+          // Watcher events will handle the research execution
         }
 
         res.json(this.successResponse({
-          researchQueued: opportunity.shouldResearch,
-          queuedQuery: opportunity.query,
-          confidence: opportunity.confidence,
-          reason: opportunity.reason,
+          researchQueued: shouldResearch,
+          queuedQuery: query,
+          confidence: decision?.confidence || opportunity.confidence,
+          reason: decision?.reason || opportunity.reason,
+          researchType: decision?.researchType || 'direct',
         }));
       } catch (error) {
         this.logger.error('Failed to process user prompt', error);
@@ -327,8 +413,35 @@ export class ResearchService {
           return;
         }
 
+        // Use SessionManager to track the tool use
+        this.sessionManager.addToolUse(sessionId, toolName, toolInput || {}, toolOutput || '', projectPath);
+
+        // Check proactive triggers (stuck detection, periodic analysis)
+        const proactiveDecision = this.watcher.checkProactiveTriggers(sessionId);
+        if (proactiveDecision?.shouldResearch) {
+          this.logger.info(`Proactive research triggered for ${sessionId}`, {
+            reason: proactiveDecision.reason,
+            query: proactiveDecision.query,
+          });
+          // Emit the research trigger - watcher events will handle execution
+          this.watcher.emit('research:triggered', sessionId, proactiveDecision);
+        }
+
+        // Check for pending injections from previous research
+        const pendingInjection = this.sessionManager.popInjection(sessionId);
+        let injection: string | null = null;
+
+        if (pendingInjection) {
+          // Format injection with pivot info if present
+          injection = this.formatInjection(pendingInjection);
+        }
+
+        // Run watcher analysis
+        const decision = await this.watcher.analyze(sessionId, 'tool_output');
+
+        // Also maintain legacy analyzer for injection handling
         const analyzer = getConversationAnalyzer();
-        const { opportunity, injection } = analyzer.processToolUse(
+        const { opportunity, injection: legacyInjection } = analyzer.processToolUse(
           sessionId,
           toolName,
           toolInput || {},
@@ -336,16 +449,25 @@ export class ResearchService {
           projectPath
         );
 
-        // If research should be queued, do it
-        if (opportunity.shouldResearch && opportunity.query) {
+        // Use new injection if available, otherwise fallback to legacy
+        injection = injection || legacyInjection;
+
+        // Combine decisions
+        const shouldResearch = decision.shouldResearch ||
+          (opportunity.shouldResearch && opportunity.confidence > 0.6);
+        const query = decision.query || opportunity.query;
+
+        if (shouldResearch && query) {
           analyzer.markResearchPerformed(sessionId);
-          await this.queueResearchFromOpportunity(sessionId, opportunity);
+          // Watcher events will handle the research execution
         }
 
         res.json(this.successResponse({
           injection,
-          researchQueued: opportunity.shouldResearch,
-          queuedQuery: opportunity.query,
+          researchQueued: shouldResearch,
+          queuedQuery: query,
+          researchType: decision.researchType,
+          pivot: decision.alternativeHint,
         }));
       } catch (error) {
         this.logger.error('Failed to process tool use', error);
@@ -366,20 +488,32 @@ export class ResearchService {
 
     // ===== Memory/Knowledge Routes =====
 
-    // Get memory stats
+    // Get research stats (from local database)
     this.app.get('/api/memory/stats', async (_req, res) => {
       try {
-        const memory = getMemoryIntegration();
-        await memory.initialize();
-        const stats = await memory.getStats();
-        res.json(this.successResponse(stats));
+        const db = this.queue.getDatabase();
+        const queueStats = db.getQueueStats();
+        const sourceStats = db.getSourceQualityStats();
+        const recentFindings = db.getRecentFindings(10);
+
+        res.json(this.successResponse({
+          totalResearch: queueStats.totalProcessed,
+          recentFindings: recentFindings.length,
+          sourceStats,
+          byStatus: {
+            queued: queueStats.queued,
+            running: queueStats.running,
+            completed: queueStats.completed,
+            failed: queueStats.failed,
+          },
+        }));
       } catch (error) {
         this.logger.error('Failed to get memory stats', error);
         res.status(500).json(this.errorResponse(String(error)));
       }
     });
 
-    // Search past research
+    // Search past research (from local database)
     this.app.get('/api/memory/search', async (req, res) => {
       try {
         const query = req.query.q as string;
@@ -388,9 +522,8 @@ export class ResearchService {
           return;
         }
         const limit = parseInt(req.query.limit as string) || 10;
-        const memory = getMemoryIntegration();
-        await memory.initialize();
-        const results = await memory.searchResearch(query, limit);
+        const db = this.queue.getDatabase();
+        const results = db.searchFindings(query, limit);
         res.json(this.successResponse(results));
       } catch (error) {
         this.logger.error('Failed to search memory', error);
@@ -398,7 +531,7 @@ export class ResearchService {
       }
     });
 
-    // Find related research
+    // Find related research (from local database)
     this.app.get('/api/memory/related', async (req, res) => {
       try {
         const query = req.query.q as string;
@@ -407,9 +540,8 @@ export class ResearchService {
           return;
         }
         const limit = parseInt(req.query.limit as string) || 5;
-        const memory = getMemoryIntegration();
-        await memory.initialize();
-        const results = await memory.findRelatedResearch(query, limit);
+        const db = this.queue.getDatabase();
+        const results = db.searchFindings(query, limit);
         res.json(this.successResponse(results));
       } catch (error) {
         this.logger.error('Failed to find related research', error);
@@ -417,34 +549,61 @@ export class ResearchService {
       }
     });
 
-    // Get knowledge topics
-    this.app.get('/api/memory/topics', async (_req, res) => {
+    // Get research by domain
+    this.app.get('/api/memory/topics', async (req, res) => {
       try {
-        const memory = getMemoryIntegration();
-        await memory.initialize();
-        const knowledge = await memory.getTopicKnowledge();
-        res.json(this.successResponse(knowledge));
+        const db = this.queue.getDatabase();
+        const domain = req.query.domain as string;
+        const limit = parseInt(req.query.limit as string) || 20;
+
+        const findings = domain
+          ? db.getFindingsByDomain(domain, limit)
+          : db.getRecentFindings(limit);
+
+        // Group by domain
+        const byDomain: Record<string, number> = {};
+        for (const f of findings) {
+          const d = f.domain || 'general';
+          byDomain[d] = (byDomain[d] || 0) + 1;
+        }
+
+        res.json(this.successResponse({
+          findings: findings.length,
+          byDomain,
+          recent: findings.slice(0, 5).map((f: ResearchFinding) => ({
+            query: f.query,
+            domain: f.domain,
+            confidence: f.confidence,
+            createdAt: f.createdAt,
+          })),
+        }));
       } catch (error) {
         this.logger.error('Failed to get topics', error);
         res.status(500).json(this.errorResponse(String(error)));
       }
     });
 
-    // Get knowledge gaps
+    // Get source quality data
     this.app.get('/api/memory/gaps', async (req, res) => {
       try {
         const limit = parseInt(req.query.limit as string) || 10;
-        const memory = getMemoryIntegration();
-        await memory.initialize();
-        const gaps = await memory.getKnowledgeGaps(limit);
-        res.json(this.successResponse(gaps));
+        const db = this.queue.getDatabase();
+
+        // Get low-quality sources as "gaps"
+        const stats = db.getSourceQualityStats();
+        const reliableSources = db.getReliableSources(undefined, limit);
+
+        res.json(this.successResponse({
+          sourceStats: stats,
+          reliableSources,
+        }));
       } catch (error) {
         this.logger.error('Failed to get knowledge gaps', error);
         res.status(500).json(this.errorResponse(String(error)));
       }
     });
 
-    // Check for existing research
+    // Check for existing research (from local database)
     this.app.get('/api/memory/check', async (req, res) => {
       try {
         const query = req.query.q as string;
@@ -452,10 +611,16 @@ export class ResearchService {
           res.status(400).json(this.errorResponse('Query parameter q is required'));
           return;
         }
-        const memory = getMemoryIntegration();
-        await memory.initialize();
-        const result = await memory.hasExistingResearch(query);
-        res.json(this.successResponse(result));
+        const db = this.queue.getDatabase();
+        const results = db.searchFindings(query, 5);
+
+        res.json(this.successResponse({
+          exists: results.length > 0,
+          related: results,
+          suggestion: results.length > 0
+            ? `Found ${results.length} related findings. Consider reviewing before new research.`
+            : 'No related research found.',
+        }));
       } catch (error) {
         this.logger.error('Failed to check existing research', error);
         res.status(500).json(this.errorResponse(String(error)));
@@ -488,6 +653,16 @@ export class ResearchService {
     if (existsSync(staticPath)) {
       this.app.use('/static', express.static(staticPath));
     }
+
+    // Serve assets directory (logos, etc.)
+    // Use __dirname equivalent for ES modules to find assets relative to compiled server.js
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+    const assetsPath = join(__dirname, '..', '..', 'assets');
+    if (existsSync(assetsPath)) {
+      this.app.use('/assets', express.static(assetsPath));
+      this.logger.debug(`Serving assets from: ${assetsPath}`);
+    }
   }
 
   /**
@@ -506,67 +681,6 @@ export class ResearchService {
         claudeMemSync: this.config.getValue('claudeMemSync'),
       },
     };
-  }
-
-  /**
-   * Queue research from a detected opportunity
-   */
-  private async queueResearchFromOpportunity(
-    sessionId: string,
-    opportunity: ResearchOpportunity
-  ): Promise<ResearchTask | null> {
-    if (!opportunity.query) return null;
-
-    try {
-      const task = await this.queue.queue({
-        query: opportunity.query,
-        depth: opportunity.depth,
-        trigger: 'tool_output', // Or 'user_prompt' based on source
-        sessionId,
-        priority: opportunity.priority,
-      });
-
-      this.logger.info(`Research queued: "${opportunity.query}" (${opportunity.reason})`);
-
-      // When research completes, queue injection
-      task.id && this.setupInjectionCallback(sessionId, task.id, opportunity.query);
-
-      return task;
-    } catch (error) {
-      this.logger.error('Failed to queue research from opportunity', error);
-      return null;
-    }
-  }
-
-  /**
-   * Setup callback to inject research results when complete
-   */
-  private setupInjectionCallback(sessionId: string, taskId: string, query: string): void {
-    // Poll for task completion and queue injection
-    const checkInterval = setInterval(async () => {
-      const task = this.queue.getTask(taskId);
-      if (!task) {
-        clearInterval(checkInterval);
-        return;
-      }
-
-      if (task.status === 'completed' && task.result) {
-        clearInterval(checkInterval);
-        const analyzer = getConversationAnalyzer();
-        analyzer.queueInjection(sessionId, {
-          taskId,
-          query,
-          summary: task.result.summary,
-          relevance: task.result.confidence,
-        });
-        this.logger.debug(`Injection queued for session ${sessionId}: "${query}"`);
-      } else if (task.status === 'failed') {
-        clearInterval(checkInterval);
-      }
-    }, 2000); // Check every 2 seconds
-
-    // Timeout after 2 minutes
-    setTimeout(() => clearInterval(checkInterval), 120000);
   }
 
   /**
@@ -632,6 +746,39 @@ export class ResearchService {
   }
 
   /**
+   * Format injection content with pivot handling
+   */
+  private formatInjection(pending: {
+    summary: string;
+    query: string;
+    relevance: number;
+    pivot?: {
+      alternative: string;
+      reason: string;
+      urgency: 'low' | 'medium' | 'high';
+    };
+  }): string {
+    const parts: string[] = [];
+
+    parts.push(`<research-context query="${pending.query}">`);
+    parts.push(pending.summary);
+
+    // Add pivot suggestion if present
+    if (pending.pivot) {
+      parts.push('');
+      const urgencyEmoji = pending.pivot.urgency === 'high' ? '🚨' :
+                          pending.pivot.urgency === 'medium' ? '💡' : 'ℹ️';
+      parts.push(`${urgencyEmoji} **Alternative Approach Detected:**`);
+      parts.push(`${pending.pivot.alternative}`);
+      parts.push(`_Reason: ${pending.pivot.reason}_`);
+    }
+
+    parts.push('</research-context>');
+
+    return parts.join('\n');
+  }
+
+  /**
    * Generate dashboard HTML
    */
   private getDashboardHTML(): string {
@@ -641,6 +788,8 @@ export class ResearchService {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Claude Research Team</title>
+  <link rel="icon" type="image/webp" href="/assets/logo.webp">
+  <link rel="apple-touch-icon" href="/assets/logo.webp">
   <style>
     :root {
       --bg: #fafafa;
@@ -692,7 +841,12 @@ export class ResearchService {
       color: var(--primary);
       text-decoration: none;
     }
-    .logo svg { width: 28px; height: 28px; }
+    .logo-icon {
+      width: 36px;
+      height: 36px;
+      object-fit: contain;
+      transition: opacity 0.3s ease;
+    }
     .header-stats {
       display: flex;
       gap: 1.5rem;
@@ -1001,10 +1155,7 @@ export class ResearchService {
   <header class="header">
     <div class="header-inner">
       <a href="/" class="logo">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="10"/>
-          <path d="M12 6v6l4 2"/>
-        </svg>
+        <img id="logo-img" src="/assets/logo.webp" alt="Claude Research Team" class="logo-icon">
         claude-research-team
       </a>
       <div class="header-stats">
@@ -1062,6 +1213,14 @@ export class ResearchService {
       document.getElementById('stat-queued').textContent = queue.queued;
       document.getElementById('stat-running').textContent = queue.running;
       document.getElementById('stat-completed').textContent = queue.completed;
+
+      // Swap logo based on running state
+      const logoImg = document.getElementById('logo-img');
+      if (logoImg) {
+        logoImg.src = queue.running > 0
+          ? '/assets/logo-animated.webp'
+          : '/assets/logo.webp';
+      }
     }
 
     function formatTime(timestamp) {

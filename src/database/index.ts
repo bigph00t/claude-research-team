@@ -14,6 +14,10 @@ import type {
   InjectionRecord,
   Session,
   QueueStats,
+  ResearchFinding,
+  InjectionLogEntry,
+  SourceQualityEntry,
+  InjectionTriggerReason,
 } from '../types.js';
 
 export class ResearchDatabase {
@@ -130,6 +134,84 @@ export class ResearchDatabase {
       CREATE INDEX IF NOT EXISTS idx_tasks_created ON research_tasks(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_injections_session ON injection_records(session_id);
       CREATE INDEX IF NOT EXISTS idx_sources_task ON research_sources(task_id);
+
+      -- =====================================================================
+      -- NEW: Research Learning Tables (v1.0)
+      -- =====================================================================
+
+      -- Thorough research storage (full content with progressive disclosure levels)
+      CREATE TABLE IF NOT EXISTS research_findings (
+        id TEXT PRIMARY KEY,
+        query TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        key_points TEXT,
+        full_content TEXT,
+        sources TEXT,
+        domain TEXT,
+        depth TEXT NOT NULL,
+        confidence REAL DEFAULT 0.5,
+        created_at INTEGER NOT NULL,
+        last_accessed_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_findings_domain ON research_findings(domain);
+      CREATE INDEX IF NOT EXISTS idx_findings_created ON research_findings(created_at DESC);
+
+      -- FTS5 for research findings
+      CREATE VIRTUAL TABLE IF NOT EXISTS research_findings_fts USING fts5(
+        query,
+        summary,
+        key_points,
+        full_content,
+        content='research_findings',
+        content_rowid='rowid'
+      );
+
+      -- Triggers to keep findings FTS in sync
+      CREATE TRIGGER IF NOT EXISTS research_findings_ai AFTER INSERT ON research_findings BEGIN
+        INSERT INTO research_findings_fts(rowid, query, summary, key_points, full_content)
+        VALUES (NEW.rowid, NEW.query, NEW.summary, NEW.key_points, NEW.full_content);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS research_findings_ad AFTER DELETE ON research_findings BEGIN
+        INSERT INTO research_findings_fts(research_findings_fts, rowid, query, summary, key_points, full_content)
+        VALUES('delete', OLD.rowid, OLD.query, OLD.summary, OLD.key_points, OLD.full_content);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS research_findings_au AFTER UPDATE ON research_findings BEGIN
+        INSERT INTO research_findings_fts(research_findings_fts, rowid, query, summary, key_points, full_content)
+        VALUES('delete', OLD.rowid, OLD.query, OLD.summary, OLD.key_points, OLD.full_content);
+        INSERT INTO research_findings_fts(rowid, query, summary, key_points, full_content)
+        VALUES (NEW.rowid, NEW.query, NEW.summary, NEW.key_points, NEW.full_content);
+      END;
+
+      -- Track what was injected and effectiveness (progressive disclosure)
+      CREATE TABLE IF NOT EXISTS injection_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        finding_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        injected_at INTEGER NOT NULL,
+        injection_level INTEGER DEFAULT 1,
+        trigger_reason TEXT,
+        followup_injected INTEGER DEFAULT 0,
+        effectiveness_score REAL,
+        resolved_issue INTEGER DEFAULT 0,
+        FOREIGN KEY(finding_id) REFERENCES research_findings(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_injection_log_session ON injection_log(session_id);
+      CREATE INDEX IF NOT EXISTS idx_injection_log_finding ON injection_log(finding_id);
+
+      -- Domain-level source quality tracking
+      CREATE TABLE IF NOT EXISTS source_quality (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        domain TEXT NOT NULL,
+        topic_category TEXT,
+        reliability_score REAL DEFAULT 0.5,
+        citation_count INTEGER DEFAULT 1,
+        helpful_count INTEGER DEFAULT 0,
+        last_cited_at INTEGER,
+        UNIQUE(domain, topic_category)
+      );
+      CREATE INDEX IF NOT EXISTS idx_source_quality_domain ON source_quality(domain);
     `);
   }
 
@@ -426,6 +508,251 @@ export class ResearchDatabase {
       injectionsCount: row.injections_count as number,
       injectionsTokens: row.injections_tokens as number,
     }));
+  }
+
+  // ============================================================================
+  // Research Findings (Progressive Disclosure)
+  // ============================================================================
+
+  saveFinding(finding: ResearchFinding): void {
+    this.db.prepare(`
+      INSERT INTO research_findings (
+        id, query, summary, key_points, full_content, sources, domain, depth, confidence, created_at, last_accessed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        summary = excluded.summary,
+        key_points = excluded.key_points,
+        full_content = excluded.full_content,
+        sources = excluded.sources,
+        confidence = excluded.confidence,
+        last_accessed_at = excluded.last_accessed_at
+    `).run(
+      finding.id,
+      finding.query,
+      finding.summary,
+      finding.keyPoints ? JSON.stringify(finding.keyPoints) : null,
+      finding.fullContent || null,
+      finding.sources ? JSON.stringify(finding.sources) : null,
+      finding.domain || null,
+      finding.depth,
+      finding.confidence,
+      finding.createdAt,
+      Date.now()
+    );
+  }
+
+  getFinding(id: string): ResearchFinding | null {
+    const row = this.db.prepare(`
+      SELECT * FROM research_findings WHERE id = ?
+    `).get(id) as Record<string, unknown> | undefined;
+
+    if (!row) return null;
+
+    // Update last accessed time
+    this.db.prepare(`UPDATE research_findings SET last_accessed_at = ? WHERE id = ?`)
+      .run(Date.now(), id);
+
+    return this.rowToFinding(row);
+  }
+
+  searchFindings(query: string, limit: number = 20): ResearchFinding[] {
+    const escapedQuery = '"' + query.replace(/"/g, '""') + '"';
+    const rows = this.db.prepare(`
+      SELECT rf.* FROM research_findings rf
+      JOIN research_findings_fts fts ON rf.rowid = fts.rowid
+      WHERE research_findings_fts MATCH ?
+      ORDER BY rank
+      LIMIT ?
+    `).all(escapedQuery, limit) as Array<Record<string, unknown>>;
+
+    return rows.map((row) => this.rowToFinding(row));
+  }
+
+  getRecentFindings(limit: number = 20): ResearchFinding[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM research_findings ORDER BY created_at DESC LIMIT ?
+    `).all(limit) as Array<Record<string, unknown>>;
+
+    return rows.map((row) => this.rowToFinding(row));
+  }
+
+  getFindingsByDomain(domain: string, limit: number = 20): ResearchFinding[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM research_findings WHERE domain = ? ORDER BY created_at DESC LIMIT ?
+    `).all(domain, limit) as Array<Record<string, unknown>>;
+
+    return rows.map((row) => this.rowToFinding(row));
+  }
+
+  private rowToFinding(row: Record<string, unknown>): ResearchFinding {
+    return {
+      id: row.id as string,
+      query: row.query as string,
+      summary: row.summary as string,
+      keyPoints: row.key_points ? JSON.parse(row.key_points as string) : undefined,
+      fullContent: row.full_content as string | undefined,
+      sources: row.sources ? JSON.parse(row.sources as string) : undefined,
+      domain: row.domain as string | undefined,
+      depth: row.depth as 'quick' | 'medium' | 'deep',
+      confidence: row.confidence as number,
+      createdAt: row.created_at as number,
+      lastAccessedAt: row.last_accessed_at as number | undefined,
+    };
+  }
+
+  // ============================================================================
+  // Injection Log (Progressive Disclosure Tracking)
+  // ============================================================================
+
+  logInjection(log: InjectionLogEntry): number {
+    const result = this.db.prepare(`
+      INSERT INTO injection_log (
+        finding_id, session_id, injected_at, injection_level, trigger_reason, followup_injected, effectiveness_score, resolved_issue
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      log.findingId,
+      log.sessionId,
+      log.injectedAt,
+      log.injectionLevel,
+      log.triggerReason || null,
+      log.followupInjected ? 1 : 0,
+      log.effectivenessScore ?? null,
+      log.resolvedIssue ? 1 : 0
+    );
+
+    return result.lastInsertRowid as number;
+  }
+
+  getInjectionHistory(sessionId: string): InjectionLogEntry[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM injection_log WHERE session_id = ? ORDER BY injected_at DESC
+    `).all(sessionId) as Array<Record<string, unknown>>;
+
+    return rows.map((row) => ({
+      id: row.id as number,
+      findingId: row.finding_id as string,
+      sessionId: row.session_id as string,
+      injectedAt: row.injected_at as number,
+      injectionLevel: row.injection_level as 1 | 2 | 3,
+      triggerReason: row.trigger_reason as InjectionTriggerReason | undefined,
+      followupInjected: (row.followup_injected as number) === 1,
+      effectivenessScore: row.effectiveness_score as number | undefined,
+      resolvedIssue: (row.resolved_issue as number) === 1,
+    }));
+  }
+
+  markInjectionEffective(id: number, score: number, resolved: boolean = false): void {
+    this.db.prepare(`
+      UPDATE injection_log SET effectiveness_score = ?, resolved_issue = ? WHERE id = ?
+    `).run(score, resolved ? 1 : 0, id);
+  }
+
+  markFollowupInjected(findingId: string, sessionId: string): void {
+    this.db.prepare(`
+      UPDATE injection_log SET followup_injected = 1
+      WHERE finding_id = ? AND session_id = ?
+      ORDER BY injected_at DESC LIMIT 1
+    `).run(findingId, sessionId);
+  }
+
+  getLastInjectionForFinding(findingId: string, sessionId: string): InjectionLogEntry | null {
+    const row = this.db.prepare(`
+      SELECT * FROM injection_log WHERE finding_id = ? AND session_id = ?
+      ORDER BY injected_at DESC LIMIT 1
+    `).get(findingId, sessionId) as Record<string, unknown> | undefined;
+
+    if (!row) return null;
+
+    return {
+      id: row.id as number,
+      findingId: row.finding_id as string,
+      sessionId: row.session_id as string,
+      injectedAt: row.injected_at as number,
+      injectionLevel: row.injection_level as 1 | 2 | 3,
+      triggerReason: row.trigger_reason as InjectionTriggerReason | undefined,
+      followupInjected: (row.followup_injected as number) === 1,
+      effectivenessScore: row.effectiveness_score as number | undefined,
+      resolvedIssue: (row.resolved_issue as number) === 1,
+    };
+  }
+
+  // ============================================================================
+  // Source Quality Tracking
+  // ============================================================================
+
+  updateSourceQuality(domain: string, topicCategory: string | null, helpful: boolean): void {
+    this.db.prepare(`
+      INSERT INTO source_quality (domain, topic_category, citation_count, helpful_count, last_cited_at, reliability_score)
+      VALUES (?, ?, 1, ?, ?, 0.5)
+      ON CONFLICT(domain, topic_category) DO UPDATE SET
+        citation_count = citation_count + 1,
+        helpful_count = helpful_count + ?,
+        last_cited_at = ?,
+        reliability_score = CAST(helpful_count + ? AS REAL) / (citation_count + 1)
+    `).run(
+      domain,
+      topicCategory,
+      helpful ? 1 : 0,
+      Date.now(),
+      helpful ? 1 : 0,
+      Date.now(),
+      helpful ? 1 : 0
+    );
+  }
+
+  getReliableSources(topicCategory?: string, limit: number = 10): SourceQualityEntry[] {
+    let query = `
+      SELECT * FROM source_quality
+      WHERE reliability_score > 0.5
+    `;
+    const params: unknown[] = [];
+
+    if (topicCategory) {
+      query += ` AND topic_category = ?`;
+      params.push(topicCategory);
+    }
+
+    query += ` ORDER BY reliability_score DESC, citation_count DESC LIMIT ?`;
+    params.push(limit);
+
+    const rows = this.db.prepare(query).all(...params) as Array<Record<string, unknown>>;
+
+    return rows.map((row) => ({
+      id: row.id as number,
+      domain: row.domain as string,
+      topicCategory: row.topic_category as string | undefined,
+      reliabilityScore: row.reliability_score as number,
+      citationCount: row.citation_count as number,
+      helpfulCount: row.helpful_count as number,
+      lastCitedAt: row.last_cited_at as number | undefined,
+    }));
+  }
+
+  getBestSourcesForTopic(topic: string, limit: number = 5): string[] {
+    const rows = this.db.prepare(`
+      SELECT domain FROM source_quality
+      WHERE topic_category = ? AND reliability_score > 0.5
+      ORDER BY reliability_score DESC, citation_count DESC
+      LIMIT ?
+    `).all(topic, limit) as Array<Record<string, unknown>>;
+
+    return rows.map((row) => row.domain as string);
+  }
+
+  getSourceQualityStats(): { totalDomains: number; reliableDomains: number; avgReliability: number } {
+    const row = this.db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN reliability_score > 0.5 THEN 1 ELSE 0 END) as reliable,
+        AVG(reliability_score) as avg_reliability
+      FROM source_quality
+    `).get() as Record<string, number>;
+
+    return {
+      totalDomains: row.total || 0,
+      reliableDomains: row.reliable || 0,
+      avgReliability: row.avg_reliability || 0,
+    };
   }
 
   // ============================================================================

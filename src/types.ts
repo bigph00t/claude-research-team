@@ -44,6 +44,13 @@ export interface ResearchResult {
   sources: ResearchSource[];
   tokensUsed: number;      // Approximate tokens in summary
   confidence: number;      // 0-1 confidence score
+  pivot?: PivotSuggestion; // Alternative approach detected
+}
+
+export interface PivotSuggestion {
+  alternative: string;     // Description of different approach
+  reason: string;          // Why this might be better
+  urgency: 'low' | 'medium' | 'high';
 }
 
 export interface ResearchSource {
@@ -65,6 +72,92 @@ export interface InjectionRecord {
   content: string;         // What was injected
   tokensUsed: number;
   accepted: boolean;       // Was it useful? (feedback)
+}
+
+// ============================================================================
+// Research Knowledgebase Types (Isolated Learning System)
+// ============================================================================
+
+/**
+ * Progressive disclosure levels for research content
+ * 1 = summary only (short, ~100-200 tokens)
+ * 2 = key_points (medium detail)
+ * 3 = full_content (complete detail)
+ */
+export type InjectionLevel = 1 | 2 | 3;
+
+/**
+ * Trigger reasons for research injection
+ */
+export type InjectionTriggerReason =
+  | 'error'        // Triggered by error detection
+  | 'proactive'    // Proactive research based on context
+  | 'manual'       // Manual skill invocation
+  | 'followup';    // Auto-injected more detail
+
+/**
+ * Thorough research storage with progressive disclosure levels
+ * Stored in research.db (isolated from claude-mem)
+ */
+export interface ResearchFinding {
+  id: string;
+  query: string;
+  summary: string;         // SHORT: what gets injected first (~100-200 tokens)
+  keyPoints?: string[];    // MEDIUM: array of bullet points
+  fullContent?: string;    // FULL: complete scraped/synthesized info
+  sources?: ResearchSourceWithQuality[];  // Sources with quality scores
+  domain?: string;         // e.g., 'typescript', 'react', 'devops'
+  depth: ResearchDepth;
+  confidence: number;      // 0-1 confidence score
+  createdAt: number;       // Unix timestamp
+  lastAccessedAt?: number;
+}
+
+/**
+ * Extended source info with quality scoring
+ */
+export interface ResearchSourceWithQuality extends ResearchSource {
+  qualityScore?: number;   // 0-1 quality score for this source
+}
+
+/**
+ * Track what was injected and effectiveness (progressive disclosure)
+ * Used for meta-learning and implicit feedback
+ */
+export interface InjectionLogEntry {
+  id?: number;             // Auto-increment
+  findingId: string;       // Links to research_findings.id
+  sessionId: string;
+  injectedAt: number;      // Unix timestamp
+  injectionLevel: InjectionLevel;  // 1=summary, 2=key_points, 3=full
+  triggerReason?: InjectionTriggerReason;  // Optional: reason for injection
+  followupInjected: boolean;  // Did we need to inject more?
+  effectivenessScore?: number; // -1 to 1, from implicit feedback
+  resolvedIssue: boolean;     // Did this help resolve the issue?
+}
+
+/**
+ * Domain-level source quality tracking
+ * Aggregated across all research findings
+ */
+export interface SourceQualityEntry {
+  id?: number;             // Auto-increment
+  domain: string;          // e.g., 'stackoverflow.com', 'github.com'
+  topicCategory?: string;  // e.g., 'typescript', 'react'
+  reliabilityScore: number; // 0-1 reliability score
+  citationCount: number;   // How many times cited
+  helpfulCount: number;    // How many times marked helpful
+  lastCitedAt?: number;    // Unix timestamp (optional until first citation)
+}
+
+/**
+ * Meta-learning insights derived from research patterns
+ */
+export interface ApproachInsights {
+  successfulPatterns: string[];   // What tends to work
+  failedPatterns: string[];       // What tends to fail
+  recommendedSources: string[];   // Best sources by domain
+  avgConfidenceByDepth: Record<ResearchDepth, number>;
 }
 
 export interface InjectionBudget {
