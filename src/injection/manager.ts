@@ -230,6 +230,7 @@ export class InjectionManager {
   /**
    * Format research result for injection
    * Keep it concise to minimize context pollution
+   * Includes prompt to inquire for more details if needed
    */
   private formatInjection(task: ResearchTask): string {
     if (!task.result) return '';
@@ -250,6 +251,13 @@ export class InjectionManager {
     if (task.result.sources.length > 0) {
       const topSource = task.result.sources[0];
       parts.push(`Source: ${topSource.title} (${topSource.url})`);
+    }
+
+    // Prompt to inquire for more - teaches Claude to use research tools
+    const sourceCount = task.result.sources.length;
+    if (sourceCount > 1 || task.result.fullContent.length > summary.length * 2) {
+      parts.push('');
+      parts.push(`💡 ${sourceCount} sources available. Use /research-status for full findings, or mem-search skill for related past research.`);
     }
 
     parts.push('</research-context>');
