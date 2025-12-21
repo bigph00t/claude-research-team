@@ -27,9 +27,8 @@ import { DEFAULT_CONFIG } from '../types.js';
 
 /**
  * Research types the watcher can identify
- * Conservative types only - no proactive research
  */
-export type ResearchType = 'error' | 'stuck' | 'unknown_api' | 'direct';
+export type ResearchType = 'error' | 'stuck' | 'unknown_api' | 'proactive' | 'direct';
 
 /**
  * Watcher's decision about whether to research
@@ -453,40 +452,44 @@ export class ConversationWatcher extends EventEmitter {
     parts.push(`## Trigger: ${trigger === 'user_prompt' ? 'New user message' : 'Tool completed'}`);
     parts.push('');
 
-    parts.push('## Research Criteria:');
+    parts.push('## Research Triggers (pick ONE if applicable):');
     parts.push('');
-    parts.push('**1. Error Resolution** - Claude encountered an error');
-    parts.push('   - Real error in tool output, not hypothetical issues');
+    parts.push('**error** - Real error in tool output (not hypothetical)');
+    parts.push('**stuck** - Claude tried 2+ times without success');
+    parts.push('**unknown_api** - Using unfamiliar third-party library/package');
+    parts.push('**proactive** - Quick lookup could help current task:');
+    parts.push('   - Working with specific package (expo-*, react-native-*, etc)');
+    parts.push('   - Implementing feature that has common patterns');
+    parts.push('   - API usage that might have gotchas');
     parts.push('');
-    parts.push('**2. Stuck on Specific Problem** - Multiple failed attempts visible');
-    parts.push('   - Claude tried something 2+ times without success');
-    parts.push('');
-    parts.push('**3. Unfamiliar External API** - Using new third-party library');
-    parts.push('   - Not standard library or common frameworks Claude knows');
-    parts.push('');
-    parts.push('**CRITICAL: Check if query relates to CURRENT TASK**');
-    parts.push('If working on "fixing dashboard counters", do NOT research:');
-    parts.push('- "Node.js graceful shutdown" (unrelated)');
-    parts.push('- "session management best practices" (tangential keyword match)');
-    parts.push('- "database indexing strategies" (not what theyre doing)');
-    parts.push('');
-    parts.push('Default: shouldResearch: false unless CLEARLY relevant to current task');
+    parts.push('**Stay relevant to CURRENT TASK** - avoid tangential topics');
     parts.push('');
 
-    parts.push('## Your Task');
-    parts.push('Check: Is this research DIRECTLY related to what Claude is currently doing?');
-    parts.push('If not directly related, set shouldResearch: false.');
+    parts.push('## Query Formatting');
+    parts.push('- Do NOT append years (2024, 2025) to queries - search engines handle recency');
+    parts.push('- Keep queries concise and specific');
+    parts.push('- Focus on the technical problem, not general topics');
     parts.push('');
 
-    parts.push('Respond in this exact JSON format:');
-    parts.push('{');
-    parts.push('  "shouldResearch": false,  // DEFAULT TO FALSE');
-    parts.push('  "query": "only if shouldResearch is true",');
-    parts.push('  "researchType": "error|stuck|unknown_api",');
-    parts.push('  "confidence": 0.0-1.0,  // Must be 0.9+ to trigger');
-    parts.push('  "priority": 1-10,');
-    parts.push('  "reason": "specific problem Claude cannot solve"');
-    parts.push('}');
+    parts.push('## When to SET shouldResearch: true');
+    parts.push('');
+    parts.push('SET TRUE when Claude is:');
+    parts.push('- Working with expo-*, react-native-*, or other packages');
+    parts.push('- Implementing features (uploads, audio, video, etc)');
+    parts.push('- Hitting any error, even if making progress');
+    parts.push('- Using APIs that have specific patterns');
+    parts.push('');
+    parts.push('KEEP FALSE only when:');
+    parts.push('- Just reading files');
+    parts.push('- Making trivial edits');
+    parts.push('- Standard patterns Claude knows well');
+    parts.push('');
+
+    parts.push('Example TRUE response:');
+    parts.push('{"shouldResearch": true, "query": "expo-file-system File class API", "researchType": "proactive", "confidence": 0.7, "priority": 5, "reason": "Claude working with expo-file-system"}');
+    parts.push('');
+    parts.push('Example FALSE response:');
+    parts.push('{"shouldResearch": false, "query": "", "researchType": "direct", "confidence": 0.2, "priority": 1, "reason": "Just reading files"}');
 
     return parts.join('\n');
   }
@@ -557,20 +560,22 @@ export class ConversationWatcher extends EventEmitter {
   private meetsThreshold(decision: WatcherDecision): boolean {
     if (!decision.shouldResearch) return false;
 
-    // Use configured threshold (default 0.85 after our changes)
+    // Use configured threshold (default 0.6)
     const baseThreshold = this.settings.confidenceThreshold;
 
     switch (decision.researchType) {
       case 'error':
-        // Errors are more actionable
+        // Errors are actionable
         return decision.confidence >= baseThreshold;
       case 'stuck':
         // Stuck needs slightly higher confidence
-        return decision.confidence >= Math.min(0.95, baseThreshold + 0.05);
+        return decision.confidence >= Math.min(0.8, baseThreshold + 0.1);
       case 'unknown_api':
         return decision.confidence >= baseThreshold;
+      case 'proactive':
+        // Proactive uses base threshold
+        return decision.confidence >= baseThreshold;
       default:
-        // Direct/other types use base threshold
         return decision.confidence >= baseThreshold;
     }
   }
