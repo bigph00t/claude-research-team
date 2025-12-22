@@ -5,7 +5,7 @@
 <h1 align="center">Claude Research Team</h1>
 
 <p align="center">
-  <strong>Autonomous multi-agent research for Claude Code</strong>
+  <strong>A unified knowledge layer for Claude Code</strong>
 </p>
 
 <p align="center">
@@ -16,146 +16,244 @@
 
 ---
 
-A background research service that watches your Claude Code sessions, detects when external information would help, and injects synthesized findings directly into your conversation context.
+## What This Is
 
-## Features
+Claude Research Team is a **knowledge augmentation system** that gives Claude Code access to:
 
-- **Autonomous detection** — Analyzes prompts and tool outputs for research opportunities
-- **17+ search sources** — GitHub, StackOverflow, npm, PyPI, crates.io, Reddit, HackerNews, Wikipedia, ArXiv, and more
-- **Multi-agent architecture** — Three specialist agents (WebSearch, CodeExpert, DocsExpert) work in parallel
-- **AI synthesis** — Claude SDK or Gemini Flash distills findings into actionable context
-- **Real-time dashboard** — Monitor research activity, queue status, and configure settings
-- **Progressive disclosure** — Concise summaries with expandable detail on demand
-- **Project-aware** — Understands your tech stack from package.json to prioritize relevant results
-- **Rate-limited** — Built-in protections against excessive API usage
+- **Memory** — What you've done, decided, learned, and built (via [claude-mem](https://github.com/thedotmack/claude-mem))
+- **Research** — External knowledge gathered asynchronously by AI agents
+
+When Claude encounters a question, error, or unfamiliar pattern, this system queries the unified knowledge base. If relevant memory exists, it injects that context. If research would help, agents fetch and synthesize it. Often, both are combined.
+
+The result: Claude remembers your past decisions AND can look things up—without you having to ask.
 
 ---
 
-## Dashboard
+## The Core Idea
 
-<p align="center">
-  <img src="assets/dashboard-findings.png" alt="Research Findings" width="700">
-</p>
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    UNIFIED KNOWLEDGE BASE                    │
+│                                                              │
+│  ┌─────────────────┐             ┌─────────────────────┐    │
+│  │     MEMORY      │             │      RESEARCH       │    │
+│  │                 │             │                     │    │
+│  │ Your decisions  │             │ External docs       │    │
+│  │ Past solutions  │      +      │ Best practices      │    │
+│  │ Code patterns   │             │ Error explanations  │    │
+│  │ Project context │             │ Library guides      │    │
+│  └─────────────────┘             └─────────────────────┘    │
+│                                                              │
+│                         ▼                                    │
+│            ┌───────────────────────┐                        │
+│            │   SMART INJECTION     │                        │
+│            │                       │                        │
+│            │ • Memory only (80t)   │                        │
+│            │ • Research only (100t)│                        │
+│            │ • Combined (150t)     │                        │
+│            │ • Warning/pivot (120t)│                        │
+│            └───────────────────────┘                        │
+│                         │                                    │
+│                         ▼                                    │
+│              Claude's conversation                           │
+│                (seamless context)                            │
+└─────────────────────────────────────────────────────────────┘
+```
 
-<p align="center">
-  <em>Research findings with sources and expandable details</em>
-</p>
+---
 
-<p align="center">
-  <img src="assets/dashboard-settings.png" alt="Settings Panel" width="700">
-</p>
+## How It Works
 
-<p align="center">
-  <em>Configure AI provider, research triggers, and rate limits</em>
-</p>
+### Knowledge Detection
+
+The system watches your Claude Code sessions via lifecycle hooks:
+
+| Hook | What It Catches |
+|------|-----------------|
+| SessionStart | Initialize session, load project context |
+| UserPromptSubmit | Analyze questions for knowledge gaps |
+| PostToolUse | Detect errors, unfamiliar APIs, stuck patterns |
+
+### Injection Types
+
+Based on what's found in the knowledge base:
+
+| Type | When Used | Example |
+|------|-----------|---------|
+| **Memory Only** | Strong match in past work | "You implemented JWT refresh tokens in project-x using httpOnly cookies" |
+| **Research Only** | New topic, nothing in memory | "Hono rate-limiter middleware: configure windowMs, max, keyGenerator" |
+| **Combined** | Both relevant | Memory of your approach + current best practices |
+| **Warning** | Research suggests better approach | "Consider using `ky` instead of manual fetch retry logic" |
+
+### What Gets Injected
+
+Injections are **concise** (80-150 tokens) and **actionable**:
+
+```
+[Memory] You handled similar auth in api-gateway (Nov 20):
+Sliding window rate limiting with Redis for distributed state.
+
+[Research] Current Hono best practice: hono-rate-limiter supports
+sliding window natively, no Redis needed for single-instance.
+(91% confidence) [/research-detail abc123]
+```
 
 ---
 
 ## Quick Start
 
+### Prerequisites
+
+- [Bun](https://bun.sh) runtime
+- [claude-mem](https://github.com/thedotmack/claude-mem) installed and running (port 37777)
+- At least one search API key (see Configuration)
+
+### Install
+
 ```bash
-# Clone and install
 git clone https://github.com/bigph00t/claude-research-team
 cd claude-research-team
 bun install
 bun run build
 
-# Configure at least one search API
-export SERPER_API_KEY="your-key"
-
 # Install as Claude Code plugin
 claude plugins install .
+```
 
-# Start the service
+### Configure
+
+Set up API keys in `.env` or export directly:
+
+```bash
+# Search APIs (at least one required)
+SERPER_API_KEY=xxx       # serper.dev (2,500/mo free)
+BRAVE_API_KEY=xxx        # brave.com/search/api (2,000/mo free)
+TAVILY_API_KEY=xxx       # tavily.com (1,000/mo free)
+
+# Code search
+GITHUB_TOKEN=xxx         # For GitHub repo/code search
+
+# AI synthesis (choose one)
+# Default: Claude SDK (uses your Anthropic account)
+GEMINI_API_KEY=xxx       # Alternative: Gemini Flash (free tier)
+```
+
+### Start
+
+```bash
 bun run start
 ```
 
-Dashboard: [http://localhost:3200](http://localhost:3200)
+**Dashboards:**
+- Research: [http://localhost:3200](http://localhost:3200)
+- Memory: [http://localhost:37777](http://localhost:37777)
+
+---
+
+## Usage
+
+### Automatic (Default)
+
+Once running, knowledge injection happens automatically:
+
+1. You work with Claude Code normally
+2. System detects questions, errors, or unfamiliar patterns
+3. Queries unified knowledge base
+4. Injects relevant memory and/or research
+5. You see context in your next response
+
+### Manual Skills
+
+```bash
+/research <query>              # Research any topic
+/research-status               # Check service health
+/research-detail <finding-id>  # Get full details + sources
+```
+
+### Research Depths
+
+| Depth | Time | Use For |
+|-------|------|---------|
+| quick | ~5s | Facts, definitions |
+| medium | ~15s | How-to, documentation |
+| deep | ~30s | Comparisons, analysis |
 
 ---
 
 ## Architecture
 
+### Multi-Agent Research
+
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Claude Code Session                          │
-│                                                                  │
-│   Hooks: SessionStart | UserPromptSubmit | PostToolUse          │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  Research Service (port 3200)                    │
-│                                                                  │
-│  ┌────────────────┐   ┌────────────────┐   ┌────────────────┐   │
-│  │ Conversation   │──▶│  Coordinator   │──▶│    Queue       │   │
-│  │ Watcher        │   │  (AI Planner)  │   │    Manager     │   │
-│  └────────────────┘   └────────────────┘   └────────────────┘   │
-│                                                   │              │
-│                    ┌──────────────────────────────┼──────────┐  │
-│                    │                              │          │  │
-│                    ▼                              ▼          ▼  │
-│  ┌──────────────────────┐ ┌──────────────────────┐ ┌─────────────┐
-│  │    WebSearch Agent   │ │    CodeExpert Agent  │ │ DocsExpert  │
-│  │                      │ │                      │ │   Agent     │
-│  │  Serper              │ │  GitHub              │ │ Wikipedia   │
-│  │  Brave               │ │  StackOverflow       │ │ ArXiv       │
-│  │  Tavily              │ │  npm                 │ │ HackerNews  │
-│  │  DuckDuckGo          │ │  PyPI                │ │ Reddit      │
-│  │                      │ │  crates.io           │ │ MDN         │
-│  │                      │ │                      │ │ Dev.to      │
-│  └──────────────────────┘ └──────────────────────┘ └─────────────┘
-│                    │              │                      │       │
-│                    └──────────────┴──────────────────────┘       │
-│                                   │                              │
-│                                   ▼                              │
-│                    ┌──────────────────────────┐                  │
-│                    │  Jina Reader (scraping)  │                  │
-│                    └──────────────────────────┘                  │
-│                                   │                              │
-│                                   ▼                              │
-│                    ┌──────────────────────────┐                  │
-│                    │   AI Synthesis           │                  │
-│                    │   (Claude SDK / Gemini)  │                  │
-│                    └──────────────────────────┘                  │
-│                                   │                              │
-│                                   ▼                              │
-│                    ┌──────────────────────────┐                  │
-│                    │   SQLite + FTS5          │                  │
-│                    │   (findings database)    │                  │
-│                    └──────────────────────────┘                  │
-└─────────────────────────────────────────────────────────────────┘
+ConversationWatcher
+│   Monitors tool outputs for research opportunities
+│   Queries unified knowledge base first
+│
+└── Coordinator
+    │   Plans research strategy
+    │   Dispatches to specialists
+    │
+    ├── WebSearchAgent
+    │   Serper, Brave, Tavily, DuckDuckGo
+    │
+    ├── CodeExpertAgent
+    │   GitHub, StackOverflow, npm, PyPI, crates.io
+    │
+    └── DocsExpertAgent
+        Wikipedia, ArXiv, MDN, HackerNews, Reddit, Dev.to
+```
+
+### claude-mem Integration
+
+Research findings are saved as **observations** (type: `discovery`) in claude-mem's database:
+
+```
+research-team                    claude-mem
+     │                               │
+     │  saveResearchAsObservation()  │
+     │ ────────────────────────────► │
+     │                               │
+     │  • observations table         │
+     │  • type = 'discovery'         │
+     │  • full FTS5 indexing         │
+     │  • vector embeddings          │
+     │                               │
+     │  searchKnowledge()            │
+     │ ◄──────────────────────────── │
+     │                               │
+     │  • Combined memory + research │
+     │  • Relevance scoring          │
+     │  • Smart injection decision   │
+```
+
+### Knowledge Flow
+
+```
+Tool Output → Watcher → Knowledge Query → Decision
+                              │              │
+                              ▼              ▼
+                    ┌──────────────┐  ┌──────────────┐
+                    │ Memory Found │  │ No Memory    │
+                    └──────────────┘  └──────────────┘
+                           │                 │
+                    ┌──────┴──────┐          ▼
+                    ▼             ▼    ┌──────────────┐
+             ┌──────────┐  ┌──────────┐│   Trigger    │
+             │ Inject   │  │ Inject + ││   Research   │
+             │ Memory   │  │ Research ││              │
+             └──────────┘  └──────────┘└──────────────┘
+                                              │
+                                              ▼
+                                       ┌──────────────┐
+                                       │ When Ready:  │
+                                       │ Inject       │
+                                       │ Research     │
+                                       └──────────────┘
 ```
 
 ---
 
 ## Configuration
-
-### API Keys
-
-Set up in `.env` or export directly:
-
-```bash
-# Search APIs (at least one required)
-SERPER_API_KEY=xxx       # serper.dev - Google Search (2,500/mo free)
-BRAVE_API_KEY=xxx        # brave.com/search/api (2,000/mo free)
-TAVILY_API_KEY=xxx       # tavily.com (1,000/mo free)
-
-# Code search
-GITHUB_TOKEN=xxx         # GitHub API for code/repo search
-
-# AI synthesis (choose one)
-# Default: Uses Claude SDK (your Anthropic account)
-GEMINI_API_KEY=xxx       # Alternative: Gemini Flash (free tier)
-```
-
-### Free Tools (No API Key)
-
-These work out of the box:
-- **Search**: DuckDuckGo
-- **Code**: StackOverflow, npm, PyPI, crates.io
-- **Documentation**: Wikipedia, ArXiv, HackerNews, Reddit, MDN, Dev.to
-- **Scraping**: Jina Reader
 
 ### Dashboard Settings
 
@@ -164,60 +262,75 @@ Access at [http://localhost:3200](http://localhost:3200):
 | Setting | Default | Description |
 |---------|---------|-------------|
 | AI Provider | Claude | Claude SDK or Gemini Flash |
-| Model | Haiku | Claude model tier (Haiku/Sonnet/Opus) |
-| Autonomous Research | Enabled | Auto-trigger research from conversation |
-| Confidence Threshold | 0.85 | Minimum confidence to trigger (0.5-0.95) |
-| Session Cooldown | 60s | Minimum time between researches |
-| Max Per Hour | 20 | Global hourly research limit |
+| Model | Haiku | Claude tier (Haiku/Sonnet/Opus) |
+| Autonomous Research | Enabled | Auto-trigger from conversation |
+| Confidence Threshold | 0.85 | Min confidence to inject |
+| Relevance Threshold | 0.8 | Min relevance to inject |
+| Session Cooldown | 60s | Between researches |
+| Max Per Hour | 15 | Global limit |
+
+### Injection Budget
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| maxPerSession | 5 | Max injections per session |
+| maxTokensPerInjection | 150 | Token limit per injection |
+| maxTotalTokensPerSession | 500 | Total tokens per session |
+| cooldownMs | 30000 | Between injections |
+
+### claude-mem Thresholds
+
+| Threshold | Default | Description |
+|-----------|---------|-------------|
+| minRelevanceScore | 0.5 | Consider for injection |
+| memoryOnlyThreshold | 0.8 | Strong memory = memory only |
+| researchOnlyThreshold | 0.6 | Research threshold |
+| combinedThreshold | 0.6 | Both must exceed for combined |
 
 ---
 
-## Usage
+## Free Tools (No API Key)
 
-### Automatic Mode
+These work out of the box:
 
-Once installed and running, research happens automatically:
+- **Search**: DuckDuckGo
+- **Code**: StackOverflow, npm, PyPI, crates.io
+- **Docs**: Wikipedia, ArXiv, HackerNews, Reddit, MDN, Dev.to
+- **Scraping**: Jina Reader
 
-1. You chat with Claude Code normally
-2. The Conversation Watcher detects questions, errors, or unfamiliar topics
-3. Specialist agents research in parallel
-4. AI synthesizes findings
-5. Context injects into your next prompt
+---
 
-```
-<research-context query="TypeScript fetch API error handling">
-Use try/catch with async/await for network errors. Check response.ok
-for HTTP status errors (4xx/5xx). Type errors as unknown in catch blocks.
+## API Reference
 
-**Sources:**
-- web.dev/articles/fetch-api-error-handling
-- dev.to/jesterxl/error-handling-for-fetch-in-typescript
-
-_More detail: /research-detail abc123_
-</research-context>
+### Status
+```http
+GET /api/health              # Health check
+GET /api/status              # Full status + config
 ```
 
-### Manual Research
-
-Use skills in Claude Code:
-
-```
-/research How to implement rate limiting in Express.js
-
-/research-status
-
-/research-detail <finding-id>
+### Research
+```http
+POST /api/research
+{
+  "query": "how to implement caching",
+  "depth": "medium",
+  "trigger": "user"
+}
 ```
 
-Or search directly from the dashboard.
+### Knowledge
+```http
+GET /api/knowledge/search?q=<query>    # Unified search
+GET /api/knowledge/:id                  # Get observation
+GET /api/findings                       # Research findings
+GET /api/injections                     # Injection history
+```
 
-### Research Depths
-
-| Depth | Time | Best For |
-|-------|------|----------|
-| quick | ~5s | Facts, definitions, simple questions |
-| medium | ~15s | How-to guides, documentation lookup |
-| deep | ~30s | Comparisons, comprehensive analysis |
+### Sessions
+```http
+GET /api/sessions                       # Active sessions
+POST /api/sessions                      # Create session
+```
 
 ---
 
@@ -226,96 +339,32 @@ Or search directly from the dashboard.
 ```
 claude-research-team/
 ├── src/
+│   ├── adapters/
+│   │   └── claude-mem-adapter.ts    # Unified knowledge access
 │   ├── agents/
-│   │   ├── coordinator.ts          # AI research planner
-│   │   ├── conversation-watcher.ts # Detects research triggers
-│   │   └── specialists/
-│   │       ├── base.ts             # Specialist base class
-│   │       ├── web-search.ts       # Serper, Brave, Tavily, DuckDuckGo
-│   │       ├── code-expert.ts      # GitHub, SO, npm, PyPI, crates.io
-│   │       └── docs-expert.ts      # Wikipedia, ArXiv, HN, Reddit, MDN
-│   ├── ai/
-│   │   └── provider.ts             # Claude SDK / Gemini abstraction
-│   ├── context/
-│   │   └── project-context.ts      # package.json analysis
+│   │   ├── coordinator.ts           # Research planning
+│   │   ├── conversation-watcher.ts  # Opportunity detection
+│   │   └── specialists/             # WebSearch, CodeExpert, DocsExpert
 │   ├── crew/
-│   │   ├── autonomous-crew.ts      # Multi-agent orchestration
-│   │   └── research-executor.ts    # Task execution
+│   │   ├── autonomous-crew.ts       # Multi-agent orchestration
+│   │   └── research-executor.ts     # Task execution
 │   ├── database/
-│   │   ├── index.ts                # SQLite + FTS5 storage
-│   │   └── sqlite-adapter.ts       # Bun SQLite compatibility
-│   ├── hooks/
-│   │   ├── session-start.ts        # Register session
-│   │   ├── user-prompt-submit.ts   # Analyze prompts
-│   │   ├── post-tool-use.ts        # Check tool outputs
-│   │   └── session-end.ts          # Cleanup
+│   │   ├── index.ts                 # SQLite + FTS5
+│   │   └── sqlite-adapter.ts        # Bun/Node compatibility
 │   ├── injection/
-│   │   └── manager.ts              # Context injection logic
-│   ├── queue/
-│   │   └── manager.ts              # Research task queue
+│   │   ├── manager.ts               # Injection logic
+│   │   └── formatters.ts            # Format functions
+│   ├── hooks/                       # Claude Code hooks
 │   ├── service/
-│   │   ├── server.ts               # HTTP + WebSocket + Dashboard
-│   │   └── session-manager.ts      # Session tracking
-│   ├── skills/
-│   │   ├── research.ts             # /research skill
-│   │   ├── research-status.ts      # /research-status skill
-│   │   └── research-detail.ts      # /research-detail skill
-│   └── types.ts                    # TypeScript definitions
-├── assets/
-│   ├── logo.png                    # Static logo
-│   ├── logo-animated.webp          # Animated logo (research active)
-│   ├── dashboard-findings.png      # Dashboard UI screenshot
-│   └── dashboard-settings.png      # Settings panel screenshot
-├── plugin.json                     # Claude Code plugin manifest
+│   │   ├── server.ts                # HTTP + Dashboard
+│   │   └── session-manager.ts       # Session tracking
+│   └── types.ts                     # TypeScript definitions
+├── skills/
+│   ├── research/                    # /research skill
+│   ├── research-status/             # /research-status skill
+│   └── research-detail/             # /research-detail skill
+├── plugin.json                      # Claude Code manifest
 └── package.json
-```
-
----
-
-## API Reference
-
-### Status
-
-```http
-GET /api/status          # Service status and config
-GET /api/queue/stats     # Queue statistics
-```
-
-### Research
-
-```http
-POST /api/research
-Content-Type: application/json
-
-{
-  "query": "how to implement caching in Node.js",
-  "depth": "medium",
-  "trigger": "user"
-}
-```
-
-### Findings
-
-```http
-GET /api/findings                     # All findings
-GET /api/findings?project=/path/to    # Filter by project
-GET /api/findings?limit=10            # Limit results
-```
-
-### Settings
-
-```http
-GET /api/settings                     # Current configuration
-POST /api/settings                    # Update settings
-POST /api/settings/reset              # Reset to defaults
-```
-
-### Sessions
-
-```http
-GET /api/sessions                     # Active sessions
-POST /api/sessions                    # Create session
-GET /api/sessions/:id/debug           # Session debug info
 ```
 
 ---
@@ -323,23 +372,12 @@ GET /api/sessions/:id/debug           # Session debug info
 ## Development
 
 ```bash
-# Install dependencies
-bun install
-
-# Build
-bun run build
-
-# Watch mode
-bun run dev
-
-# Start service
-bun run start
-
-# Clean build
-bun run clean && bun run build
-
-# Run tests
-bun test
+bun install           # Install dependencies
+bun run build         # Build
+bun run dev           # Watch mode
+bun run start         # Start service
+bun run clean         # Clean build
+bun test              # Run tests
 ```
 
 ---
@@ -348,21 +386,38 @@ bun test
 
 **Service won't start**
 ```bash
-lsof -i :3200  # Check if port is in use
-bun run start  # Start manually
+lsof -i :3200         # Check port
+bun run start         # Start manually
 ```
 
-**No research triggering**
-- Check dashboard: Is autonomous research enabled?
-- Lower confidence threshold (try 0.7)
-- Verify API keys are set
-
-**Plugin not working**
+**claude-mem not connecting**
 ```bash
-claude plugins list           # Verify installation
-bun run clean && bun run build  # Rebuild
-claude plugins install .      # Reinstall
+curl http://localhost:37777/api/health   # Check claude-mem
+ls ~/.claude-mem/claude-mem.db           # Database exists?
 ```
+
+**No injections happening**
+- Check dashboard: autonomous research enabled?
+- Lower thresholds (try 0.6 relevance)
+- Verify API keys
+
+**Research not saving to claude-mem**
+- Check logs for "fallback mode" (adapter couldn't connect)
+- Restart both services
+
+---
+
+## Philosophy
+
+This system is built on a simple insight: **knowledge compounds**.
+
+Every time you solve a problem, make a decision, or learn something new, that knowledge should be available in future sessions. Every research query should benefit not just the current conversation, but all future ones.
+
+The goal isn't to replace Claude's capabilities—it's to give Claude access to two things it doesn't have by default:
+1. Memory of your specific project history
+2. The ability to look things up during conversation
+
+Combined, these create an assistant that learns your codebase over time and can always fetch current information when needed.
 
 ---
 
@@ -373,5 +428,5 @@ AGPL-3.0 — See [LICENSE](LICENSE)
 ---
 
 <p align="center">
-  <sub>Built for developers who want Claude to know what they're Googling anyway.</sub>
+  <sub>Built for developers who want Claude to remember what they've done and know what they don't.</sub>
 </p>
