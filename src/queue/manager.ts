@@ -12,13 +12,13 @@ import type {
   ResearchDepth,
 } from '../types.js';
 import { ResearchDatabase, getDatabase } from '../database/index.js';
-import { ResearchExecutor } from '../crew/research-executor.js';
+import { getAutonomousCrew, type AutonomousResearchCrew } from '../crew/autonomous-crew.js';
 import { Logger } from '../utils/logger.js';
 import { EventEmitter } from 'events';
 
 export class QueueManager extends EventEmitter {
   private db: ResearchDatabase;
-  private executor: ResearchExecutor;
+  private crew: AutonomousResearchCrew;
   private logger: Logger;
   private config: QueueConfig;
   private running: Map<string, Promise<void>> = new Map();
@@ -28,7 +28,7 @@ export class QueueManager extends EventEmitter {
   constructor(config?: Partial<QueueConfig>) {
     super();
     this.db = getDatabase();
-    this.executor = new ResearchExecutor();
+    this.crew = getAutonomousCrew();
     this.logger = new Logger('QueueManager');
     this.config = {
       maxConcurrent: config?.maxConcurrent ?? 2,
@@ -200,13 +200,37 @@ export class QueueManager extends EventEmitter {
       attempts++;
 
       try {
-        // Execute with timeout
-        const result = await Promise.race([
-          this.executor.execute(task),
+        // Execute with timeout using autonomous crew (specialists)
+        const crewResult = await Promise.race([
+          this.crew.explore({
+            query: task.query,
+            sessionId: task.sessionId,
+            context: task.context,
+            depth: task.depth,
+            projectPath: task.projectPath,
+          }),
           new Promise<never>((_, reject) =>
             setTimeout(() => reject(new Error('Task timeout')), this.config.taskTimeoutMs)
           ),
         ]);
+
+        // Convert crew result to task result format
+        const result = {
+          summary: crewResult.summary,
+          fullContent: crewResult.keyFindings?.length
+            ? `## Key Findings\n${crewResult.keyFindings.map(f => `- ${f}`).join('\n')}`
+            : crewResult.summary,
+          sources: (crewResult.sources || []).map((s, i) => ({
+            title: s.title,
+            url: s.url,
+            snippet: s.snippet || '',
+            relevance: s.relevance ?? (1 - i * 0.05),
+          })),
+          tokensUsed: crewResult.tokensUsed || 0,
+          confidence: crewResult.confidence,
+          relevance: 0.5, // Will be computed later
+          findingId: crewResult.findingId,
+        };
 
         // Save result
         this.db.saveTaskResult(task.id, result);

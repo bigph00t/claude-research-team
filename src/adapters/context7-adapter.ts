@@ -123,9 +123,29 @@ export class Context7Adapter {
       if (Array.isArray(content) && content.length > 0) {
         const textContent = content.find((c: { type: string }) => c.type === 'text');
         if (textContent && 'text' in textContent) {
-          // Context7 returns JSON with library info
+          const text = textContent.text as string;
+
+          // Context7 returns a formatted text list of libraries
+          // Parse out the first library ID with highest relevance
+          // Format: "- Context7-compatible library ID: /org/project"
+          const libraryIdMatch = text.match(/Context7-compatible library ID:\s*([^\n\s]+)/);
+          if (libraryIdMatch) {
+            const libraryId = libraryIdMatch[1].trim();
+
+            // Also extract title and description if available
+            const titleMatch = text.match(/- Title:\s*([^\n]+)/);
+            const descMatch = text.match(/- Description:\s*([^\n]+)/);
+
+            return {
+              id: libraryId,
+              name: titleMatch ? titleMatch[1].trim() : libraryName,
+              description: descMatch ? descMatch[1].trim() : undefined,
+            };
+          }
+
+          // Try JSON fallback
           try {
-            const parsed = JSON.parse(textContent.text as string);
+            const parsed = JSON.parse(text);
             if (parsed.id) {
               return {
                 id: parsed.id,
@@ -134,14 +154,7 @@ export class Context7Adapter {
               };
             }
           } catch {
-            // If not JSON, might be the ID directly
-            const text = textContent.text as string;
-            if (text && !text.includes('not found') && !text.includes('error')) {
-              return {
-                id: text.trim(),
-                name: libraryName,
-              };
-            }
+            // Not JSON format
           }
         }
       }
