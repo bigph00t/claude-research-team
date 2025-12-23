@@ -171,21 +171,29 @@ export class DocsExpertAgent extends BaseSpecialistAgent {
     const data = await safeParseJson<NpmResponse>(response);
     if (!data?.objects) return [];
 
-    return data.objects.map(obj => ({
-      title: `${obj.package.name}@${obj.package.version}`,
-      url: obj.package.links?.npm || `https://www.npmjs.com/package/${obj.package.name}`,
-      snippet: obj.package.description || obj.package.keywords?.join(', ') || 'npm package',
-      source: 'npm',
-      relevance: obj.score?.final || 0.7,
-      metadata: {
-        version: obj.package.version,
-        keywords: obj.package.keywords,
-        quality: obj.score?.detail?.quality,
-        popularity: obj.score?.detail?.popularity,
-        homepage: obj.package.links?.homepage,
-        repository: obj.package.links?.repository,
-      },
-    }));
+    return data.objects.map((obj, index) => {
+      // Use detail scores (0-1) instead of final (can be 1000+)
+      const detail = obj.score?.detail;
+      const relevance = detail
+        ? (detail.quality + detail.popularity + detail.maintenance) / 3
+        : 0.7 - (index * 0.05);
+
+      return {
+        title: `${obj.package.name}@${obj.package.version}`,
+        url: obj.package.links?.npm || `https://www.npmjs.com/package/${obj.package.name}`,
+        snippet: obj.package.description || obj.package.keywords?.join(', ') || 'npm package',
+        source: 'npm',
+        relevance,
+        metadata: {
+          version: obj.package.version,
+          keywords: obj.package.keywords,
+          quality: obj.score?.detail?.quality,
+          popularity: obj.score?.detail?.popularity,
+          homepage: obj.package.links?.homepage,
+          repository: obj.package.links?.repository,
+        },
+      };
+    });
   }
 
   /**
