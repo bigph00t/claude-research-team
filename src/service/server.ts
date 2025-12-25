@@ -462,6 +462,16 @@ Respond with JSON only: { "relevance": 0.0-1.0, "reason": "brief explanation" }`
       res.json(this.successResponse(task));
     });
 
+    // Alias for /api/tasks/:id - Claude often tries /api/research/:id for polling
+    this.app.get('/api/research/:id', (req, res): void => {
+      const task = this.queue.getTask(req.params.id);
+      if (!task) {
+        res.status(404).json(this.errorResponse('Research task not found'));
+        return;
+      }
+      res.json(this.successResponse(task));
+    });
+
     // Search tasks
     this.app.get('/api/search/tasks', (req, res): void => {
       const query = req.query.q as string;
