@@ -29,6 +29,7 @@ import type {
   ResearchTask,
   ResearchDepth,
 } from '../types.js';
+import { fetchUrl } from '../skills/fetch.js';
 
 const VERSION = '1.0.0';
 
@@ -77,6 +78,9 @@ export class ResearchService {
 
     // Setup queue event forwarding
     this.setupQueueEvents();
+
+    // Initialize watcher with loaded config (critical for autonomousEnabled)
+    this.watcher.updateConfig(this.config.get());
   }
 
   /**
@@ -472,6 +476,31 @@ Respond with JSON only: { "relevance": 0.0-1.0, "reason": "brief explanation" }`
       res.json(this.successResponse(task));
     });
 
+    // Fetch specific URL content
+    this.app.post('/api/fetch', async (req, res): Promise<void> => {
+      try {
+        const { url, query, maxLength, store, sessionId } = req.body;
+
+        if (!url || typeof url !== 'string') {
+          res.status(400).json(this.errorResponse('URL is required'));
+          return;
+        }
+
+        const result = await fetchUrl({
+          url,
+          query,
+          maxLength: maxLength || 12000,
+          store: store !== false,  // Default to true
+          sessionId,
+        });
+
+        res.json(this.successResponse(result));
+      } catch (error) {
+        this.logger.error('Failed to fetch URL', error);
+        res.status(500).json(this.errorResponse(String(error)));
+      }
+    });
+
     // Search tasks
     this.app.get('/api/search/tasks', (req, res): void => {
       const query = req.query.q as string;
@@ -604,6 +633,18 @@ Respond with JSON only: { "relevance": 0.0-1.0, "reason": "brief explanation" }`
           return;
         }
 
+        // Check if autonomous research is disabled - skip all background processing
+        const autonomousEnabled = this.config.getValue('research').autonomousEnabled;
+        if (!autonomousEnabled) {
+          // Just track the prompt for session context, no analysis
+          this.sessionManager.addUserPrompt(sessionId, prompt, projectPath);
+          res.json(this.successResponse({
+            researchQueued: false,
+            reason: 'Autonomous research disabled',
+          }));
+          return;
+        }
+
         // Use SessionManager to track the prompt
         this.sessionManager.addUserPrompt(sessionId, prompt, projectPath);
 
@@ -649,6 +690,18 @@ Respond with JSON only: { "relevance": 0.0-1.0, "reason": "brief explanation" }`
         const { sessionId, toolName, toolInput, toolOutput, projectPath } = req.body;
         if (!sessionId || !toolName) {
           res.status(400).json(this.errorResponse('sessionId and toolName required'));
+          return;
+        }
+
+        // Check if autonomous research is disabled - skip ALL background processing
+        const autonomousEnabled = this.config.getValue('research').autonomousEnabled;
+        if (!autonomousEnabled) {
+          // Respond immediately with no processing - manual /research still works
+          res.json(this.successResponse({
+            injection: null,
+            researchQueued: false,
+            reason: 'Autonomous research disabled',
+          }));
           return;
         }
 

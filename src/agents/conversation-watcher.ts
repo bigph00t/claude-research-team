@@ -101,6 +101,13 @@ export class ConversationWatcher extends EventEmitter {
   }
 
   /**
+   * Check if autonomous research is enabled
+   */
+  isAutonomousEnabled(): boolean {
+    return this.autonomousEnabled;
+  }
+
+  /**
    * Check global rate limit
    */
   private checkGlobalRateLimit(): boolean {
@@ -307,6 +314,11 @@ export class ConversationWatcher extends EventEmitter {
    * manually calling the research() MCP tool.
    */
   quickAnalyze(sessionId: string): WatcherDecision | null {
+    // Check if autonomous research is enabled
+    if (!this.autonomousEnabled) {
+      return null;
+    }
+
     const context = this.sessionManager.getWatcherContext(sessionId);
     if (!context) return null;
 
