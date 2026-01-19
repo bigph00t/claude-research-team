@@ -1,0 +1,18 @@
+{
+  "name": "bigph00t",
+  "owner": {
+    "name": "bigph00t"
+  },
+  "metadata": {
+    "description": "Plugins by bigph00t",
+    "homepage": "https://github.com/bigph00t/claude-research-team"
+  },
+  "plugins": [
+    {
+      "name": "claude-research-team",
+      "version": "1.0.0",
+      "source": "./plugin",
+      "description": "Multi-agent research system with 17+ search sources and AI synthesis"
+    }
+  ]
+}

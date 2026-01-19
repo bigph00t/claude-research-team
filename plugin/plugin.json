@@ -1,0 +1,6 @@
+{
+  "name": "claude-research-team",
+  "version": "1.0.0",
+  "description": "Autonomous research agents for Claude Code - research topics with web search and AI synthesis",
+  "author": "bigphoot"
+}
