@@ -7,6 +7,7 @@
  */
 
 import { Logger } from '../../utils/logger.js';
+import { getDatabase } from '../../database/index.js';
 
 // ============================================================================
 // Types
@@ -177,7 +178,7 @@ export abstract class BaseSpecialistAgent {
   }
 
   /**
-   * Scrape content from URLs using Jina Reader (free)
+   * Scrape content from URLs using Jina Reader (with caching)
    */
   protected async scrapeTopResults(
     results: SearchResult[],
@@ -185,10 +186,29 @@ export abstract class BaseSpecialistAgent {
   ): Promise<ScrapedContent[]> {
     const scraped: ScrapedContent[] = [];
     const JINA_READER_URL = 'https://r.jina.ai/';
+    const db = getDatabase();
+
+    let cacheHits = 0;
+    let cacheMisses = 0;
 
     await Promise.all(
       results.map(async result => {
         try {
+          // Check cache first
+          const cached = db.getCachedUrl(result.url);
+          if (cached) {
+            cacheHits++;
+            scraped.push({
+              url: result.url,
+              content: cached.content,
+              title: cached.title || result.title,
+              truncated: false,
+            });
+            return;
+          }
+
+          // Cache miss - scrape with Jina
+          cacheMisses++;
           const response = await fetch(`${JINA_READER_URL}${result.url}`, {
             headers: { 'Accept': 'text/plain' },
             signal: AbortSignal.timeout(perPageTimeoutMs),
@@ -196,9 +216,14 @@ export abstract class BaseSpecialistAgent {
 
           if (response.ok) {
             const text = await response.text();
+            const content = text.slice(0, 8000);
+
+            // Cache the content
+            db.cacheUrl(result.url, content, { title: result.title });
+
             scraped.push({
               url: result.url,
-              content: text.slice(0, 8000),
+              content,
               title: result.title,
               truncated: text.length > 8000,
             });
@@ -208,6 +233,10 @@ export abstract class BaseSpecialistAgent {
         }
       })
     );
+
+    if (cacheHits > 0 || cacheMisses > 0) {
+      this.logger.debug(`URL cache: ${cacheHits} hits, ${cacheMisses} misses`);
+    }
 
     return scraped;
   }

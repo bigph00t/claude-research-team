@@ -1,23 +1,21 @@
 /**
  * Claude Research Team
- * Autonomous research agents for Claude Code
+ * Research agents for Claude Code via /research skill
  *
  * Provides:
- * - Background research queue with priority management
- * - Passive context injection via Claude Code hooks
+ * - Research queue with priority management
+ * - Multi-agent research (WebSearch, CodeExpert, DocsExpert, etc.)
  * - Web UI dashboard for monitoring
- * - Optional claude-mem integration for cross-session persistence
+ * - Research results storage for deduplication and compounding
  */
 
 // Core exports
 export { ResearchService } from './service/server.js';
 export { QueueManager } from './queue/manager.js';
-export { InjectionManager } from './injection/manager.js';
 export { ResearchExecutor } from './crew/research-executor.js';
 
-// New agents and crew
+// Research crew and agents
 export { getSessionManager, SessionManager } from './service/session-manager.js';
-export { getConversationWatcher, ConversationWatcher } from './agents/conversation-watcher.js';
 export { getAutonomousCrew, AutonomousResearchCrew } from './crew/autonomous-crew.js';
 export { CoordinatorAgent } from './agents/coordinator.js';
 export * from './agents/specialists/index.js';

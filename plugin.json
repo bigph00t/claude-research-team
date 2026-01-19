@@ -30,6 +30,11 @@
       "name": "research-detail",
       "description": "Get more detail from a previous research finding. Use when you need deeper information than the initial summary provided.",
       "file": "dist/skills/research-detail.js"
+    },
+    {
+      "name": "fetch",
+      "description": "Fetch content from a specific URL. Use when you have a direct link and need its content, rather than doing a broad search.",
+      "file": "dist/skills/fetch.js"
     }
   ],
   "mcp": {

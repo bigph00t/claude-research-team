@@ -14,15 +14,11 @@ import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 
 import { QueueManager } from '../queue/manager.js';
-import { InjectionManager } from '../injection/manager.js';
 import { getDatabase, closeDatabase } from '../database/index.js';
 import { getConfig, ConfigManager } from '../utils/config.js';
 import { Logger, setLogLevel, setLogFile } from '../utils/logger.js';
-import { getConversationAnalyzer } from '../conversation/analyzer.js';
 import type { ResearchFinding } from '../types.js';
 import { getSessionManager } from './session-manager.js';
-import { getConversationWatcher, type WatcherDecision } from '../agents/conversation-watcher.js';
-import { getAutonomousCrew } from '../crew/autonomous-crew.js';
 import type {
   ServiceStatus,
   ApiResponse,
@@ -38,9 +34,7 @@ export class ResearchService {
   private server: Server;
   private wss: WebSocketServer;
   private queue: QueueManager;
-  private injector: InjectionManager;
   private sessionManager = getSessionManager();
-  private watcher = getConversationWatcher();
   private config: ConfigManager;
   private logger: Logger;
   private startTime: number = Date.now();
@@ -54,12 +48,8 @@ export class ResearchService {
     setLogLevel(this.config.getValue('logLevel'));
     setLogFile(join(this.config.getDataDir(), 'logs', 'service.log'));
 
-    // Initialize components
+    // Initialize queue
     this.queue = new QueueManager(this.config.getValue('queue'));
-    this.injector = new InjectionManager(this.config.getValue('injection'));
-
-    // Setup watcher events
-    this.setupWatcherEvents();
 
     // Setup Express
     this.app = express();
@@ -78,9 +68,6 @@ export class ResearchService {
 
     // Setup queue event forwarding
     this.setupQueueEvents();
-
-    // Initialize watcher with loaded config (critical for autonomousEnabled)
-    this.watcher.updateConfig(this.config.get());
   }
 
   /**
@@ -124,66 +111,6 @@ export class ResearchService {
   }
 
   /**
-   * Compute relevance of research results to the current task
-   * This is a POST-research check to ensure we only inject useful info
-   */
-  private async computeRelevance(
-    sessionId: string,
-    query: string,
-    summary: string
-  ): Promise<number> {
-    try {
-      const { getSessionTracker } = await import('../context/session-tracker.js');
-      const { getAIProvider } = await import('../ai/provider.js');
-
-      const tracker = getSessionTracker();
-      const ai = getAIProvider();
-
-      const sessionSummary = tracker.getSessionSummary(sessionId);
-
-      const prompt = `Evaluate how relevant this research result is to the current task.
-
-## Current Task Context
-${sessionSummary}
-
-## Research Query
-${query}
-
-## Research Result Summary
-${summary.slice(0, 1500)}
-
-## Evaluation
-Rate the relevance from 0.0 to 1.0:
-- 1.0 = Directly answers the current question/problem
-- 0.8 = Very helpful for the current task
-- 0.6 = Somewhat relevant, might be useful
-- 0.4 = Tangentially related
-- 0.2 = Barely relevant
-- 0.0 = Not relevant at all
-
-Consider:
-1. Does this help with what Claude is CURRENTLY trying to do?
-2. Is this information Claude likely already knows?
-3. Would injecting this be valuable or just noise?
-
-Respond with JSON only: { "relevance": 0.0-1.0, "reason": "brief explanation" }`;
-
-      const response = await ai.analyze(prompt);
-      const jsonMatch = response.match(/\{[\s\S]*?\}/);
-
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return Math.min(1, Math.max(0, parsed.relevance || 0.5));
-      }
-    } catch (error) {
-      this.logger.debug('Relevance computation failed, using default', { error });
-    }
-
-    // Default to moderate relevance if AI analysis fails
-    return 0.5;
-  }
-
-  /**
    * Setup queue event forwarding to WebSocket
    */
   private setupQueueEvents(): void {
@@ -197,202 +124,10 @@ Respond with JSON only: { "relevance": 0.0-1.0, "reason": "brief explanation" }`
 
     this.queue.on('taskCompleted', (task: ResearchTask) => {
       this.broadcast('taskCompleted', task);
-      // NOTE: Injection is handled by setupWatcherEvents with proper relevance checking
-      // Do NOT inject here - it bypasses relevance threshold and causes over-injection
     });
 
     this.queue.on('taskFailed', (task: ResearchTask) => {
       this.broadcast('taskFailed', task);
-    });
-  }
-
-  /**
-   * Setup watcher events for autonomous research
-   */
-  // Track in-flight research to prevent duplicates
-  private inFlightResearch: Map<string, Set<string>> = new Map();
-
-  private setupWatcherEvents(): void {
-    // When watcher triggers research, execute via autonomous crew
-    this.watcher.on('research:triggered', async (sessionId: string, decision: WatcherDecision) => {
-      if (!decision.query) return;
-
-      // Strip years from queries - search engines handle recency automatically
-      decision.query = decision.query
-        .replace(/\b20(2[0-9]|1[0-9])\b/g, '') // Remove years 2010-2029
-        .replace(/\s{2,}/g, ' ')  // Collapse multiple spaces
-        .trim();
-
-      // Deduplicate: Check if similar query is already in-flight for this session
-      const sessionInFlight = this.inFlightResearch.get(sessionId) || new Set();
-      const queryKey = decision.query.toLowerCase().trim();
-
-      // Check for exact match OR similar in-flight queries
-      for (const inFlightQuery of sessionInFlight) {
-        if (inFlightQuery === queryKey || this.calculateSimilarity(inFlightQuery, queryKey) > 0.4) {
-          this.logger.debug(`Skipping similar in-flight research: "${decision.query}" (similar to "${inFlightQuery}")`);
-          return;
-        }
-      }
-
-      // Also check for similar recent research (15 min window)
-      if (this.sessionManager.hasRecentSimilarResearch(sessionId, decision.query, 900000)) { // 15 min
-        this.logger.debug(`Skipping similar recent research: "${decision.query}"`);
-        return;
-      }
-
-      // Mark as in-flight
-      sessionInFlight.add(queryKey);
-      this.inFlightResearch.set(sessionId, sessionInFlight);
-
-      this.logger.info(`Watcher triggered research for ${sessionId}`, {
-        query: decision.query,
-        type: decision.researchType,
-        confidence: decision.confidence,
-      });
-
-      // Create task in database to track status (for dashboard Running/Completed)
-      const db = this.queue.getDatabase();
-      const task = db.createTask({
-        id: crypto.randomUUID(),
-        query: decision.query,
-        context: decision.alternativeHint,
-        depth: 'quick',
-        status: 'running',
-        trigger: 'tool_output',  // Watcher-triggered research comes from tool output analysis
-        sessionId,
-        priority: decision.priority,
-      });
-
-      // Broadcast running status to dashboard
-      this.broadcast('taskUpdate', { task, action: 'started' });
-
-      try {
-        // Use autonomous crew for background research
-        // Always use 'quick' for background research - user can request deeper manually
-        const crew = getAutonomousCrew();
-        const result = await crew.explore({
-          query: decision.query,
-          sessionId,
-          context: decision.alternativeHint,
-          depth: 'quick',
-        });
-
-        // Queue injection when complete - but only if relevant to current task
-        if (result.summary) {
-          // Compute relevance score - how well does this help the current task?
-          const relevance = await this.computeRelevance(sessionId, decision.query, result.summary);
-          const relevanceThreshold = this.config.getValue('research').relevanceThreshold ?? 0.7;
-
-          this.logger.info(`Research complete for ${sessionId}`, {
-            query: decision.query,
-            confidence: result.confidence,  // Source quality
-            relevance: relevance,           // Task relevance
-            meetsThreshold: relevance >= relevanceThreshold,
-            hasPivot: !!result.pivot,
-            findingId: result.findingId,
-          });
-
-          // Only queue injection if relevance meets threshold
-          if (relevance >= relevanceThreshold) {
-            try {
-              this.sessionManager.queueInjection(sessionId, {
-                summary: result.summary,
-                query: decision.query,
-                relevance: relevance,
-                priority: decision.priority,
-                findingId: result.findingId,
-                sources: result.sources?.slice(0, 3).map(s => ({ title: s.title, url: s.url })),
-              });
-            } catch (e) {
-              this.logger.error('Failed at queueInjection', e);
-              throw e;
-            }
-          } else {
-            this.logger.info(`Research not relevant enough to inject`, {
-              query: decision.query,
-              relevance,
-              threshold: relevanceThreshold,
-            });
-          }
-
-          // CRITICAL: Record research in session history to prevent duplicates
-          try {
-            this.sessionManager.recordResearch(
-              sessionId,
-              decision.query,
-              result.findingId || 'unknown',
-              result.confidence
-            );
-          } catch (e) {
-            this.logger.error('Failed at recordResearch', e);
-            throw e;
-          }
-
-          // Update task to completed - with detailed error tracking
-          try {
-            db.updateTaskStatus(task.id, 'completed', { completedAt: Date.now() });
-          } catch (e) {
-            this.logger.error('Failed at updateTaskStatus', e);
-            throw e;
-          }
-
-          if (result.summary) {
-            try {
-              db.saveTaskResult(task.id, {
-                summary: result.summary,
-                confidence: result.confidence,
-                relevance: relevance,
-                sources: (result.sources || []).map(s => ({
-                  title: s.title,
-                  url: s.url,
-                  snippet: s.snippet,
-                  relevance: s.relevance ?? 0.5,
-                })),
-                fullContent: result.summary,
-                tokensUsed: 0,
-                findingId: result.findingId,
-              });
-            } catch (e) {
-              this.logger.error('Failed at saveTaskResult', e);
-              throw e;
-            }
-          }
-
-          try {
-            this.broadcast('taskUpdate', { task: { ...task, status: 'completed' }, action: 'completed' });
-          } catch (e) {
-            this.logger.error('Failed at broadcast', e);
-            throw e;
-          }
-        } else {
-          // No result - mark as failed
-          db.updateTaskStatus(task.id, 'failed', { completedAt: Date.now() });
-          this.broadcast('taskUpdate', { task: { ...task, status: 'failed' }, action: 'failed' });
-        }
-      } catch (error) {
-        this.logger.error(`Background research failed for ${sessionId}`, error);
-        // Update task to failed
-        db.updateTaskStatus(task.id, 'failed', { completedAt: Date.now() });
-        this.broadcast('taskUpdate', { task: { ...task, status: 'failed' }, action: 'failed' });
-      } finally {
-        // Remove from in-flight tracking
-        const sessionInFlight = this.inFlightResearch.get(sessionId);
-        if (sessionInFlight) {
-          sessionInFlight.delete(queryKey);
-          if (sessionInFlight.size === 0) {
-            this.inFlightResearch.delete(sessionId);
-          }
-        }
-      }
-    });
-
-    this.watcher.on('analysis:complete', (sessionId: string, decision: WatcherDecision) => {
-      this.broadcast('watcherAnalysis', { sessionId, decision });
-    });
-
-    this.watcher.on('cooldown:active', (sessionId: string, remainingMs: number) => {
-      this.logger.debug(`Cooldown active for ${sessionId}: ${remainingMs}ms`);
     });
   }
 
@@ -513,50 +248,6 @@ Respond with JSON only: { "relevance": 0.0-1.0, "reason": "brief explanation" }`
       res.json(this.successResponse(tasks));
     });
 
-    // ===== Trigger Detection Routes =====
-    // Now uses ConversationWatcher for AI-powered detection
-
-    // Quick pattern-based analysis (no Claude call)
-    this.app.post('/api/analyze/quick', (req, res): void => {
-      const { sessionId } = req.body;
-      if (!sessionId) {
-        res.status(400).json(this.errorResponse('sessionId is required'));
-        return;
-      }
-      const result = this.watcher.quickAnalyze(sessionId);
-      res.json(this.successResponse(result || { shouldResearch: false, reason: 'No patterns matched' }));
-    });
-
-    // Full AI-powered analysis
-    this.app.post('/api/analyze/full', async (req, res): Promise<void> => {
-      try {
-        const { sessionId, eventType } = req.body;
-        if (!sessionId) {
-          res.status(400).json(this.errorResponse('sessionId is required'));
-          return;
-        }
-        const result = await this.watcher.analyze(sessionId, eventType || 'user_prompt');
-        res.json(this.successResponse(result));
-      } catch (error) {
-        this.logger.error('Analysis failed', error);
-        res.status(500).json(this.errorResponse(String(error)));
-      }
-    });
-
-    // ===== Injection Routes =====
-
-    // Get injection for session
-    this.app.get('/api/injection/:sessionId', (req, res) => {
-      const context = req.query.context as string;
-      const injection = this.injector.getInjection(req.params.sessionId, context);
-      res.json(this.successResponse({ injection }));
-    });
-
-    // Get injection history
-    this.app.get('/api/injection/:sessionId/history', (req, res) => {
-      const history = this.injector.getHistory(req.params.sessionId);
-      res.json(this.successResponse(history));
-    });
 
     // ===== Session Routes =====
 
@@ -588,8 +279,8 @@ Respond with JSON only: { "relevance": 0.0-1.0, "reason": "brief explanation" }`
     // End session
     this.app.post('/api/sessions/:sessionId/end', (req, res) => {
       const { sessionId } = req.params;
-      const analyzer = getConversationAnalyzer();
-      analyzer.endSession(sessionId);
+      // Clean up session from in-memory manager
+      this.sessionManager.endSession(sessionId);
       res.json(this.successResponse({ sessionId, ended: true }));
     });
 
@@ -621,243 +312,6 @@ Respond with JSON only: { "relevance": 0.0-1.0, "reason": "brief explanation" }`
       }));
     });
 
-    // ===== Conversation Streaming Routes =====
-    // These endpoints receive streaming data from hooks
-
-    // Process user prompt from UserPromptSubmit hook
-    this.app.post('/api/conversation/user-prompt', async (req, res) => {
-      try {
-        const { sessionId, prompt, projectPath } = req.body;
-        if (!sessionId || !prompt) {
-          res.status(400).json(this.errorResponse('sessionId and prompt required'));
-          return;
-        }
-
-        // Check if autonomous research is disabled - skip all background processing
-        const autonomousEnabled = this.config.getValue('research').autonomousEnabled;
-        if (!autonomousEnabled) {
-          // Just track the prompt for session context, no analysis
-          this.sessionManager.addUserPrompt(sessionId, prompt, projectPath);
-          res.json(this.successResponse({
-            researchQueued: false,
-            reason: 'Autonomous research disabled',
-          }));
-          return;
-        }
-
-        // Use SessionManager to track the prompt
-        this.sessionManager.addUserPrompt(sessionId, prompt, projectPath);
-
-        // Try quick analysis first (pattern-based, no Claude call)
-        let decision = this.watcher.quickAnalyze(sessionId);
-
-        // If no quick match, run full analysis with Claude
-        if (!decision) {
-          decision = await this.watcher.analyze(sessionId, 'user_prompt');
-        }
-
-        // Also maintain legacy analyzer for backward compatibility
-        const analyzer = getConversationAnalyzer();
-        const opportunity = analyzer.processUserPrompt(sessionId, prompt, projectPath);
-
-        // Combine decisions - prefer watcher if confident
-        const shouldResearch = decision?.shouldResearch ||
-          (opportunity.shouldResearch && opportunity.confidence > 0.6);
-        const query = decision?.query || opportunity.query;
-
-        if (shouldResearch && query) {
-          analyzer.markResearchPerformed(sessionId);
-          // Watcher events will handle the research execution
-        }
-
-        res.json(this.successResponse({
-          researchQueued: shouldResearch,
-          queuedQuery: query,
-          confidence: decision?.confidence || opportunity.confidence,
-          reason: decision?.reason || opportunity.reason,
-          researchType: decision?.researchType || 'direct',
-        }));
-      } catch (error) {
-        this.logger.error('Failed to process user prompt', error);
-        res.status(500).json(this.errorResponse(String(error)));
-      }
-    });
-
-    // Process tool use from PostToolUse hook
-    // CRITICAL: Must respond quickly (<1s) to not block Claude
-    this.app.post('/api/conversation/tool-use', (req, res) => {
-      try {
-        const { sessionId, toolName, toolInput, toolOutput, projectPath } = req.body;
-        if (!sessionId || !toolName) {
-          res.status(400).json(this.errorResponse('sessionId and toolName required'));
-          return;
-        }
-
-        // Check if autonomous research is disabled - skip ALL background processing
-        const autonomousEnabled = this.config.getValue('research').autonomousEnabled;
-        if (!autonomousEnabled) {
-          // Respond immediately with no processing - manual /research still works
-          res.json(this.successResponse({
-            injection: null,
-            researchQueued: false,
-            reason: 'Autonomous research disabled',
-          }));
-          return;
-        }
-
-        // Use SessionManager to track the tool use (fast, in-memory)
-        this.sessionManager.addToolUse(sessionId, toolName, toolInput || {}, toolOutput || '', projectPath);
-
-        // Check for pending injections from previous research (fast, in-memory)
-        const pendingInjection = this.sessionManager.popInjection(sessionId);
-        let injection: string | null = null;
-
-        if (pendingInjection) {
-          // Format injection with pivot info if present
-          injection = this.formatInjection(pendingInjection);
-
-          // Log injection for dashboard visibility
-          if (pendingInjection.findingId) {
-            const db = this.queue.getDatabase();
-            db.logInjection({
-              findingId: pendingInjection.findingId,
-              sessionId,
-              injectedAt: Date.now(),
-              injectionLevel: 1,
-              triggerReason: 'proactive',
-              followupInjected: false,
-              resolvedIssue: false,
-            });
-            this.logger.info('Injection delivered', {
-              sessionId,
-              query: pendingInjection.query,
-              findingId: pendingInjection.findingId,
-            });
-            // Broadcast injection event to dashboard
-            this.broadcast('injection', {
-              sessionId,
-              query: pendingInjection.query,
-              summary: pendingInjection.summary.slice(0, 200),
-              injectedAt: Date.now(),
-            });
-          }
-        } else {
-          // PAST RESEARCH RE-INJECTION: Check if relevant past findings exist
-          // This helps when Claude "forgot" something already researched
-          try {
-            const db = this.queue.getDatabase();
-            const context = this.sessionManager.getWatcherContext(sessionId);
-            if (context) {
-              // Build a search query from recent context
-              const recentText = context.recentMessages
-                .slice(-3)
-                .map(m => m.content)
-                .join(' ')
-                .slice(0, 500);
-
-              if (recentText.length > 50) {
-                // Search for relevant past findings
-                const relevantFindings = db.searchFindings(recentText, 3);
-
-                // Check if any finding is recent enough and relevant
-                const oneHourAgo = Date.now() - 3600000;
-                const recentRelevant = relevantFindings.find(f =>
-                  f.createdAt > oneHourAgo && f.confidence > 0.7
-                );
-
-                if (recentRelevant) {
-                  // Format a shorter "remembered" injection
-                  const keyPoints = recentRelevant.keyPoints?.slice(0, 3) || [];
-                  const summary = keyPoints.length > 0
-                    ? keyPoints.map(p => `- ${p}`).join('\n')
-                    : recentRelevant.summary.slice(0, 300);
-
-                  injection = `<research-context query="${recentRelevant.query}" remembered="true">
-${summary}
-
-_Previously researched - use /research-detail ${recentRelevant.id} for more_
-</research-context>`;
-
-                  this.logger.info('Past research re-injected', {
-                    sessionId,
-                    query: recentRelevant.query,
-                    findingId: recentRelevant.id,
-                  });
-
-                  // Log the re-injection
-                  db.logInjection({
-                    findingId: recentRelevant.id,
-                    sessionId,
-                    injectedAt: Date.now(),
-                    injectionLevel: 1,
-                    triggerReason: 'proactive',
-                    followupInjected: false,
-                    resolvedIssue: false,
-                  });
-                }
-              }
-            }
-          } catch (e) {
-            this.logger.debug('Past research re-injection check failed', e);
-          }
-        }
-
-        // Also check legacy analyzer for injection (fast, in-memory)
-        const analyzer = getConversationAnalyzer();
-        const { opportunity, injection: legacyInjection } = analyzer.processToolUse(
-          sessionId,
-          toolName,
-          toolInput || {},
-          toolOutput || '',
-          projectPath
-        );
-
-        // Use new injection if available, otherwise fallback to legacy
-        injection = injection || legacyInjection;
-
-        // RESPOND IMMEDIATELY - Don't block on slow analysis
-        // NOTE: We removed checkProactiveTriggers() - dual trigger was causing duplicate research spam
-        const injectionConfig = this.config.getValue('injection');
-        res.json(this.successResponse({
-          injection,
-          injectionQuery: pendingInjection?.query,  // For visible display
-          showInConversation: injectionConfig?.showInConversation ?? false,
-          researchQueued: opportunity.shouldResearch && opportunity.confidence > 0.6,
-          queuedQuery: opportunity.query,
-          researchType: 'proactive',
-          pivot: null,
-        }));
-
-        // BACKGROUND: Run watcher analysis after response sent (single trigger path)
-        // This won't block the hook
-        setImmediate(async () => {
-          try {
-            // Only run watcher analysis - single trigger path prevents duplicates
-            const decision = await this.watcher.analyze(sessionId, 'tool_output');
-            if (decision.shouldResearch && decision.query) {
-              analyzer.markResearchPerformed(sessionId);
-              this.watcher.emit('research:triggered', sessionId, decision);
-            }
-          } catch (err) {
-            this.logger.error('Background analysis failed', err);
-          }
-        });
-      } catch (error) {
-        this.logger.error('Failed to process tool use', error);
-        res.status(500).json(this.errorResponse(String(error)));
-      }
-    });
-
-    // Get session conversation stats
-    this.app.get('/api/conversation/:sessionId/stats', (req, res) => {
-      const analyzer = getConversationAnalyzer();
-      const stats = analyzer.getSessionStats(req.params.sessionId);
-      if (!stats) {
-        res.status(404).json(this.errorResponse('Session not found'));
-        return;
-      }
-      res.json(this.successResponse(stats));
-    });
 
     // ===== Memory/Knowledge Routes =====
 
@@ -1032,6 +486,66 @@ _Previously researched - use /research-detail ${recentRelevant.id} for more_
         res.json(this.successResponse(finding));
       } catch (error) {
         this.logger.error('Failed to get finding', error);
+        res.status(500).json(this.errorResponse(String(error)));
+      }
+    });
+
+    // ===== URL Cache Routes =====
+
+    // Get URL cache statistics
+    this.app.get('/api/cache/stats', (_req, res) => {
+      try {
+        const db = getDatabase();
+        const stats = db.getUrlCacheStats();
+        res.json(this.successResponse(stats));
+      } catch (error) {
+        this.logger.error('Failed to get cache stats', error);
+        res.status(500).json(this.errorResponse(String(error)));
+      }
+    });
+
+    // Get top cached URLs
+    this.app.get('/api/cache/top', (req, res) => {
+      try {
+        const limit = parseInt(req.query.limit as string) || 10;
+        const db = getDatabase();
+        const topUrls = db.getTopCachedUrls(limit);
+        res.json(this.successResponse(topUrls));
+      } catch (error) {
+        this.logger.error('Failed to get top cached URLs', error);
+        res.status(500).json(this.errorResponse(String(error)));
+      }
+    });
+
+    // Clean expired cache entries
+    this.app.post('/api/cache/clean', (_req, res) => {
+      try {
+        const db = getDatabase();
+        const deletedCount = db.cleanExpiredCache();
+        res.json(this.successResponse({ deletedCount }));
+      } catch (error) {
+        this.logger.error('Failed to clean cache', error);
+        res.status(500).json(this.errorResponse(String(error)));
+      }
+    });
+
+    // Check if a URL is cached (for debugging)
+    this.app.get('/api/cache/check', (req, res) => {
+      try {
+        const url = req.query.url as string;
+        if (!url) {
+          res.status(400).json(this.errorResponse('URL parameter required'));
+          return;
+        }
+        const db = getDatabase();
+        const cached = db.getCachedUrl(url);
+        res.json(this.successResponse({
+          cached: !!cached,
+          cachedAt: cached?.cachedAt,
+          contentLength: cached?.content.length,
+        }));
+      } catch (error) {
+        this.logger.error('Failed to check cache', error);
         res.status(500).json(this.errorResponse(String(error)));
       }
     });
@@ -1233,9 +747,6 @@ _Previously researched - use /research-detail ${recentRelevant.id} for more_
           this.config.setValue('aiProvider', newAiConfig);
         }
 
-        // Notify watcher of config changes
-        this.watcher.updateConfig(this.config.get());
-
         res.json(this.successResponse({ message: 'Settings saved' }));
       } catch (error) {
         res.status(400).json(this.errorResponse(String(error)));
@@ -1245,7 +756,6 @@ _Previously researched - use /research-detail ${recentRelevant.id} for more_
     this.app.post('/api/settings/reset', (_req, res) => {
       try {
         this.config.reset();
-        this.watcher.updateConfig(this.config.get());
         res.json(this.successResponse({ message: 'Settings reset to defaults' }));
       } catch (error) {
         res.status(500).json(this.errorResponse(String(error)));
@@ -1285,6 +795,7 @@ _Previously researched - use /research-detail ${recentRelevant.id} for more_
       version: VERSION,
       queue: this.queue.getStats(),
       activeSessions: getDatabase().getActiveSessions().length,
+      urlCache: getDatabase().getUrlCacheStats(),
       config: {
         port: this.config.getValue('port'),
         logLevel: this.config.getValue('logLevel'),
@@ -1353,72 +864,6 @@ _Previously researched - use /research-detail ${recentRelevant.id} for more_
    */
   private errorResponse(error: string): ApiResponse {
     return { success: false, error };
-  }
-
-  /**
-   * Calculate Jaccard similarity between two strings
-   * Used for deduplicating similar research queries
-   */
-  private calculateSimilarity(a: string, b: string): number {
-    const wordsA = new Set(a.toLowerCase().split(/\s+/).filter(w => w.length > 3));
-    const wordsB = new Set(b.toLowerCase().split(/\s+/).filter(w => w.length > 3));
-
-    if (wordsA.size === 0 || wordsB.size === 0) return 0;
-
-    const intersection = new Set([...wordsA].filter(w => wordsB.has(w)));
-    const union = new Set([...wordsA, ...wordsB]);
-
-    return intersection.size / union.size;
-  }
-
-  /**
-   * Format injection content with pivot handling and sources
-   */
-  private formatInjection(pending: {
-    summary: string;
-    query: string;
-    relevance: number;
-    findingId?: string;
-    pivot?: {
-      alternative: string;
-      reason: string;
-      urgency: 'low' | 'medium' | 'high';
-    };
-    sources?: Array<{ title: string; url: string }>;
-  }): string {
-    const parts: string[] = [];
-
-    parts.push(`<research-context query="${pending.query}">`);
-    parts.push(pending.summary);
-
-    // Add sources if present
-    if (pending.sources && pending.sources.length > 0) {
-      parts.push('');
-      parts.push('**Sources:**');
-      for (const source of pending.sources) {
-        parts.push(`- [${source.title}](${source.url})`);
-      }
-    }
-
-    // Add pivot suggestion if present
-    if (pending.pivot) {
-      parts.push('');
-      const urgencyEmoji = pending.pivot.urgency === 'high' ? '🚨' :
-                          pending.pivot.urgency === 'medium' ? '💡' : 'ℹ️';
-      parts.push(`${urgencyEmoji} **Alternative Approach Detected:**`);
-      parts.push(`${pending.pivot.alternative}`);
-      parts.push(`_Reason: ${pending.pivot.reason}_`);
-    }
-
-    // Add findingId for progressive disclosure (allows requesting more detail)
-    if (pending.findingId) {
-      parts.push('');
-      parts.push(`_More detail available: use /research-detail ${pending.findingId}_`);
-    }
-
-    parts.push('</research-context>');
-
-    return parts.join('\n');
   }
 
   /**

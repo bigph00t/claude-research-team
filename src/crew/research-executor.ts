@@ -374,27 +374,47 @@ export class ResearchExecutor {
   }
 
   /**
-   * Scrape content from URLs using Jina Reader
+   * Scrape content from URLs using Jina Reader (with caching)
    */
   private async scrapeTopResults(
     results: SearchResult[],
     timeoutMs: number
-  ): Promise<Array<{ url: string; content: string }>> {
-    const scraped: Array<{ url: string; content: string }> = [];
+  ): Promise<Array<{ url: string; content: string; cached?: boolean }>> {
+    const scraped: Array<{ url: string; content: string; cached?: boolean }> = [];
     const perPageTimeout = Math.floor(timeoutMs / results.length);
+    const db = getDatabase();
+
+    let cacheHits = 0;
+    let cacheMisses = 0;
 
     await Promise.all(
       results.map(async (result) => {
         try {
+          // Check cache first
+          const cached = db.getCachedUrl(result.url);
+          if (cached) {
+            cacheHits++;
+            scraped.push({ url: result.url, content: cached.content, cached: true });
+            return;
+          }
+
+          // Cache miss - scrape with Jina
+          cacheMisses++;
           const content = await this.scrapeWithJina(result.url, perPageTimeout);
           if (content) {
-            scraped.push({ url: result.url, content });
+            // Cache the content
+            db.cacheUrl(result.url, content, { title: result.title });
+            scraped.push({ url: result.url, content, cached: false });
           }
         } catch (e) {
           this.logger.debug(`Failed to scrape ${result.url}`, e);
         }
       })
     );
+
+    if (cacheHits > 0 || cacheMisses > 0) {
+      this.logger.info(`URL cache: ${cacheHits} hits, ${cacheMisses} misses`);
+    }
 
     return scraped;
   }

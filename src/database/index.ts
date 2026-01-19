@@ -346,6 +346,25 @@ export class ResearchDatabase {
         UNIQUE(domain, topic_category)
       );
       CREATE INDEX IF NOT EXISTS idx_source_quality_domain ON source_quality(domain);
+
+      -- =====================================================================
+      -- URL Cache (v1.1) - Prevents re-scraping same URLs
+      -- =====================================================================
+      CREATE TABLE IF NOT EXISTS url_cache (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        url TEXT NOT NULL,
+        normalized_url TEXT NOT NULL UNIQUE,
+        title TEXT,
+        content TEXT NOT NULL,
+        content_length INTEGER NOT NULL,
+        scraped_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        source TEXT DEFAULT 'jina',
+        hit_count INTEGER DEFAULT 1,
+        last_accessed_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_url_cache_expires ON url_cache(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_url_cache_scraped ON url_cache(scraped_at DESC);
     `);
   }
 
@@ -1327,6 +1346,221 @@ export class ResearchDatabase {
       reliableDomains: row.reliable || 0,
       avgReliability: row.avg_reliability || 0,
     };
+  }
+
+  // ============================================================================
+  // URL Cache - Prevents re-scraping same URLs
+  // ============================================================================
+
+  /**
+   * Default TTL values by domain pattern (in milliseconds)
+   */
+  private getDefaultTtl(url: string): number {
+    const MS_HOUR = 3600000;
+    const MS_DAY = MS_HOUR * 24;
+
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+
+      // Documentation sites - stable, cache longer
+      if (hostname.includes('docs.') ||
+          hostname.includes('documentation') ||
+          hostname.includes('developer.mozilla.org') ||
+          hostname.includes('devdocs.io')) {
+        return MS_DAY * 7; // 7 days
+      }
+
+      // Package registries - relatively stable
+      if (hostname.includes('npmjs.com') ||
+          hostname.includes('pypi.org') ||
+          hostname.includes('crates.io') ||
+          hostname.includes('pkg.go.dev')) {
+        return MS_DAY * 3; // 3 days
+      }
+
+      // Q&A sites - answers evolve
+      if (hostname.includes('stackoverflow.com') ||
+          hostname.includes('stackexchange.com')) {
+        return MS_DAY * 2; // 2 days
+      }
+
+      // Code hosting - changes frequently
+      if (hostname.includes('github.com') ||
+          hostname.includes('gitlab.com') ||
+          hostname.includes('bitbucket.org')) {
+        return MS_DAY; // 1 day
+      }
+
+      // News/blogs - time-sensitive
+      if (hostname.includes('news.') ||
+          hostname.includes('blog.') ||
+          hostname.includes('medium.com') ||
+          hostname.includes('dev.to')) {
+        return MS_DAY; // 1 day
+      }
+
+      // Default
+      return MS_DAY; // 1 day
+    } catch {
+      return MS_DAY;
+    }
+  }
+
+  /**
+   * Normalize URL for cache lookup (removes query params, fragments, trailing slashes)
+   */
+  normalizeUrlForCache(url: string): string {
+    try {
+      const parsed = new URL(url);
+      // Keep protocol, host, and pathname; remove query and hash
+      let normalized = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+      // Remove trailing slash unless it's the root
+      if (normalized.endsWith('/') && parsed.pathname !== '/') {
+        normalized = normalized.slice(0, -1);
+      }
+      return normalized.toLowerCase();
+    } catch {
+      return url.toLowerCase();
+    }
+  }
+
+  /**
+   * Get cached URL content if available and not expired
+   */
+  getCachedUrl(url: string): { content: string; title?: string; cachedAt: number } | null {
+    const normalizedUrl = this.normalizeUrlForCache(url);
+    const now = Date.now();
+
+    const row = this.db.prepare(`
+      SELECT content, title, scraped_at, expires_at
+      FROM url_cache
+      WHERE normalized_url = ? AND expires_at > ?
+    `).get(normalizedUrl, now) as Record<string, unknown> | undefined;
+
+    if (!row) return null;
+
+    // Update hit count and last accessed
+    this.db.prepare(`
+      UPDATE url_cache
+      SET hit_count = hit_count + 1, last_accessed_at = ?
+      WHERE normalized_url = ?
+    `).run(now, normalizedUrl);
+
+    return {
+      content: row.content as string,
+      title: row.title as string | undefined,
+      cachedAt: row.scraped_at as number,
+    };
+  }
+
+  /**
+   * Cache URL content with automatic TTL based on domain
+   */
+  cacheUrl(
+    url: string,
+    content: string,
+    options?: { title?: string; ttlMs?: number; source?: string }
+  ): void {
+    const normalizedUrl = this.normalizeUrlForCache(url);
+    const now = Date.now();
+    const ttlMs = options?.ttlMs ?? this.getDefaultTtl(url);
+    const expiresAt = now + ttlMs;
+
+    this.db.prepare(`
+      INSERT INTO url_cache (url, normalized_url, title, content, content_length, scraped_at, expires_at, source, last_accessed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(normalized_url) DO UPDATE SET
+        content = excluded.content,
+        content_length = excluded.content_length,
+        title = COALESCE(excluded.title, title),
+        scraped_at = excluded.scraped_at,
+        expires_at = excluded.expires_at,
+        source = excluded.source,
+        hit_count = hit_count + 1,
+        last_accessed_at = excluded.last_accessed_at
+    `).run(
+      url,
+      normalizedUrl,
+      options?.title || null,
+      content,
+      content.length,
+      now,
+      expiresAt,
+      options?.source || 'jina',
+      now
+    );
+  }
+
+  /**
+   * Clean expired cache entries
+   * @returns Number of entries deleted
+   */
+  cleanExpiredCache(): number {
+    const result = this.db.prepare(`
+      DELETE FROM url_cache WHERE expires_at < ?
+    `).run(Date.now());
+
+    return result.changes;
+  }
+
+  /**
+   * Get URL cache statistics
+   */
+  getUrlCacheStats(): {
+    totalCached: number;
+    totalHits: number;
+    avgHitsPerUrl: number;
+    totalContentSize: number;
+    oldestEntry: number | null;
+    newestEntry: number | null;
+  } {
+    const row = this.db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(hit_count) as total_hits,
+        AVG(hit_count) as avg_hits,
+        SUM(content_length) as total_size,
+        MIN(scraped_at) as oldest,
+        MAX(scraped_at) as newest
+      FROM url_cache
+      WHERE expires_at > ?
+    `).get(Date.now()) as Record<string, number | null>;
+
+    return {
+      totalCached: row.total || 0,
+      totalHits: row.total_hits || 0,
+      avgHitsPerUrl: row.avg_hits || 0,
+      totalContentSize: row.total_size || 0,
+      oldestEntry: row.oldest,
+      newestEntry: row.newest,
+    };
+  }
+
+  /**
+   * Get most frequently accessed cached URLs
+   */
+  getTopCachedUrls(limit: number = 10): Array<{
+    url: string;
+    hitCount: number;
+    contentLength: number;
+    scrapedAt: number;
+    expiresAt: number;
+  }> {
+    const rows = this.db.prepare(`
+      SELECT url, hit_count, content_length, scraped_at, expires_at
+      FROM url_cache
+      WHERE expires_at > ?
+      ORDER BY hit_count DESC
+      LIMIT ?
+    `).all(Date.now(), limit) as Array<Record<string, unknown>>;
+
+    return rows.map(row => ({
+      url: row.url as string,
+      hitCount: row.hit_count as number,
+      contentLength: row.content_length as number,
+      scrapedAt: row.scraped_at as number,
+      expiresAt: row.expires_at as number,
+    }));
   }
 
   // ============================================================================

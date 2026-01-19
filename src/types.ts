@@ -236,45 +236,6 @@ export interface ProjectFile {
 }
 
 // ============================================================================
-// Session Goal Tracking Types
-// ============================================================================
-
-export interface SessionGoal {
-  id: string;
-  sessionId: string;
-  description: string;             // What Claude is trying to accomplish
-  status: 'active' | 'completed' | 'blocked' | 'abandoned';
-  createdAt: number;
-  updatedAt: number;
-  blockers?: string[];             // Current blockers/issues
-  subTasks?: SessionSubTask[];     // Breakdown of goal into tasks
-}
-
-export interface SessionSubTask {
-  description: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'blocked';
-  startedAt?: number;
-  completedAt?: number;
-}
-
-export interface SessionContext {
-  sessionId: string;
-  projectContext?: ProjectContext; // Cached project understanding
-  currentGoal?: SessionGoal;       // What Claude is working on now
-  recentActions: SessionAction[];  // Recent tool calls and decisions
-  knowledgeGaps: string[];         // Identified areas where research might help
-  lastAnalyzedAt: number;          // When context was last analyzed
-}
-
-export interface SessionAction {
-  type: 'tool_call' | 'decision' | 'error' | 'user_request';
-  description: string;
-  timestamp: number;
-  toolName?: string;
-  errorMessage?: string;
-}
-
-// ============================================================================
 // Research Decision Types (Smart Query Generation)
 // ============================================================================
 
@@ -455,12 +416,22 @@ export interface ApiResponse<T = unknown> {
   error?: string;
 }
 
+export interface UrlCacheStats {
+  totalCached: number;
+  totalHits: number;
+  avgHitsPerUrl: number;
+  totalContentSize: number;
+  oldestEntry: number | null;
+  newestEntry: number | null;
+}
+
 export interface ServiceStatus {
   running: boolean;
   uptime: number;
   version: string;
   queue: QueueStats;
   activeSessions: number;
+  urlCache?: UrlCacheStats;
   config: Partial<Config>;
 }
 
