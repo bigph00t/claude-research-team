@@ -1,17 +1,10 @@
 {
   "name": "claude-research-team",
   "version": "1.0.0",
-  "description": "Autonomous research agents for Claude Code - passively research and inject helpful context",
+  "description": "Autonomous research agents for Claude Code - research topics with web search and AI synthesis",
   "author": {
     "name": "bigphoot"
   },
   "repository": "https://github.com/bigph00t/claude-research-team",
-  "license": "AGPL-3.0",
-  "keywords": [
-    "research",
-    "web-search",
-    "agents",
-    "context",
-    "injection"
-  ]
+  "license": "AGPL-3.0"
 }
