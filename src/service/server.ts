@@ -179,6 +179,82 @@ export class ResearchService {
       }
     });
 
+    // Synchronous research execution - waits for completion
+    this.app.post('/api/research/execute', async (req, res): Promise<void> => {
+      try {
+        const { query, context, depth, priority, sessionId } = req.body;
+
+        if (!query || typeof query !== 'string') {
+          res.status(400).json(this.errorResponse('Query is required'));
+          return;
+        }
+
+        // Strip years from queries
+        const cleanQuery = query
+          .replace(/\b20(2[0-9]|1[0-9])\b/g, '')
+          .replace(/\s{2,}/g, ' ')
+          .trim();
+
+        // Timeouts: quick=90s, medium=180s, deep=300s (research involves multiple API calls)
+        const timeout = depth === 'deep' ? 300000 : depth === 'medium' ? 180000 : 90000;
+
+        // Set up promise BEFORE queuing to avoid race condition
+        const resultPromise = new Promise<ResearchTask>((resolve, reject) => {
+          let taskId: string | null = null;
+
+          const timer = setTimeout(() => {
+            cleanup();
+            reject(new Error('Research timed out'));
+          }, timeout);
+
+          const cleanup = () => {
+            clearTimeout(timer);
+            this.queue.off('taskCompleted', onComplete);
+            this.queue.off('taskFailed', onFailed);
+          };
+
+          const onComplete = (completedTask: ResearchTask) => {
+            if (taskId && completedTask.id === taskId) {
+              cleanup();
+              resolve(completedTask);
+            }
+          };
+
+          const onFailed = (failedTask: ResearchTask, error: Error) => {
+            if (taskId && failedTask.id === taskId) {
+              cleanup();
+              reject(error);
+            }
+          };
+
+          // Attach listeners first
+          this.queue.on('taskCompleted', onComplete);
+          this.queue.on('taskFailed', onFailed);
+
+          // Queue the task and capture the ID
+          this.queue.queue({
+            query: cleanQuery,
+            context,
+            depth: depth as ResearchDepth || 'medium',
+            trigger: 'manual',
+            sessionId,
+            priority: priority || 10,
+          }).then(task => {
+            taskId = task.id;
+          }).catch(err => {
+            cleanup();
+            reject(err);
+          });
+        });
+
+        const result = await resultPromise;
+        res.json(this.successResponse(result));
+      } catch (error) {
+        this.logger.error('Failed to execute research', error);
+        res.status(500).json(this.errorResponse(String(error)));
+      }
+    });
+
     // Get queue stats
     this.app.get('/api/queue/stats', (_req, res) => {
       res.json(this.successResponse(this.queue.getStats()));

@@ -39,7 +39,7 @@ curl -X POST http://localhost:3200/api/research/execute \
   -d '{"query": "<parsed_query>", "depth": "<depth>"}'
 ```
 
-This returns results directly (takes longer but no polling needed).
+This returns results directly (blocks until complete). Timeouts: quick=90s, medium=180s, deep=300s.
 
 ## Examples
 
